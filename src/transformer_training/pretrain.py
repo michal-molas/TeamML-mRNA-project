@@ -20,8 +20,8 @@ class MRNACsvDataset(Dataset):
         self.max_utr5_len = max_utr5_len
         self.max_cds_len = max_cds_len
         self.max_utr3_len = max_utr3_len
-        # input length after teacher-forced shift (full sequence length - 1)
-        self.max_len = max_utr5_len + max_cds_len + max_utr3_len + 6
+        # full sequence length - 1 (because we shift by 1 when comparing input_ids and target_ids)
+        self.max_len = (max_utr5_len + max_cds_len + max_utr3_len + 7) - 1
         self.vocab = {
             'A': 0,
             'C': 1,
@@ -65,23 +65,11 @@ class MRNACsvDataset(Dataset):
         target_tokens = [self.utr5_id] + utr5_tokens + [self.sep_id] + [self.utr3_id] + utr3_tokens + [self.eos_id]
         full_tokens = (prefix_tokens + target_tokens)[: self.max_len + 1]
 
-        if len(full_tokens) < 2:
-            empty_long = torch.full((self.max_len,), self.pad_id, dtype=torch.long)
-            empty_mask = torch.zeros(self.max_len, dtype=torch.float)
-            empty_padding = torch.ones(self.max_len, dtype=torch.bool)
-            return empty_long, empty_long.clone(), empty_long.clone(), empty_mask, empty_padding
-
-        # region ids: 0=utr5, 1=cds, 2=utr3, 3=special/pad
-        prefix_regions = [3, 3] + [1] * len(cds_tokens) + [3]
-        target_regions = [3] + [0] * len(utr5_tokens) + [3] + [3] + [2] * len(utr3_tokens) + [3]
-        full_regions = (prefix_regions + target_regions)[: len(full_tokens)]
-
-        generation_start_idx = min(len(prefix_tokens), len(full_tokens) - 1)
+        generation_start_idx = len(prefix_tokens)
         full_loss_mask = [0] * generation_start_idx + [1] * (len(full_tokens) - generation_start_idx)
 
         input_ids = full_tokens[:-1]
         target_ids = full_tokens[1:]
-        region_ids = full_regions[:-1]
         loss_mask = full_loss_mask[1:]
 
         seq_len = len(input_ids)
@@ -89,21 +77,19 @@ class MRNACsvDataset(Dataset):
 
         input_ids = torch.tensor(input_ids + [self.pad_id] * padding_length, dtype=torch.long)
         target_ids = torch.tensor(target_ids + [self.pad_id] * padding_length, dtype=torch.long)
-        region_ids = torch.tensor(region_ids + [3] * padding_length, dtype=torch.long)
         loss_mask = torch.tensor(loss_mask + [0] * padding_length, dtype=torch.float)
 
         padding_mask = torch.zeros(self.max_len, dtype=torch.bool)
         if padding_length > 0:
             padding_mask[-padding_length:] = True
 
-        return input_ids, region_ids, target_ids, loss_mask, padding_mask
+        return input_ids, target_ids, loss_mask, padding_mask
 
-class MaskedRNAGenerator(nn.Module):
+class MRNATransformer(nn.Module):
     def __init__(self, vocab_size, d_model, nhead, num_layers, max_len):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.pos_embedding = nn.Embedding(max_len, d_model)
-        self.region_embedding = nn.Embedding(4, d_model)
         
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model, nhead=nhead, batch_first=True, activation='gelu'
@@ -111,15 +97,14 @@ class MaskedRNAGenerator(nn.Module):
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.seq_head = nn.Linear(d_model, vocab_size)
 
-    def forward(self, x, region_ids, padding_mask=None):
+    def forward(self, x, padding_mask):
         seq_len = x.size(1)
         pos = torch.arange(seq_len, device=x.device).unsqueeze(0).expand_as(x)
         
         x_emb = self.embedding(x)
         pos_emb = self.pos_embedding(pos)
-        reg_emb = self.region_embedding(region_ids)
         
-        hidden = x_emb + pos_emb + reg_emb
+        hidden = x_emb + pos_emb
         causal_mask = torch.triu(
             torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1
         )
@@ -135,7 +120,7 @@ def train(args, device):
     )
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
-    model = MaskedRNAGenerator(
+    model = MRNATransformer(
         vocab_size=dataset.vocab_size,
         d_model=args.d_model,
         nhead=args.n_heads,
@@ -147,17 +132,15 @@ def train(args, device):
 
     model.train()
     for epoch in range(args.epochs):
-        print("Epoch", epoch)
-        for step, (input_ids, region_ids, target_ids, loss_mask, padding_mask) in tqdm(list(enumerate(dataloader))):
+        for step, (input_ids, target_ids, loss_mask, padding_mask) in tqdm(list(enumerate(dataloader))):
             input_ids = input_ids.to(device)
-            region_ids = region_ids.to(device)
             target_ids = target_ids.to(device)
             loss_mask = loss_mask.to(device)
             padding_mask = padding_mask.to(device)
 
             optimizer.zero_grad()
             
-            outputs = model(input_ids, region_ids, padding_mask)
+            outputs = model(input_ids, padding_mask=padding_mask)
             
             outputs_flat = outputs.view(-1, outputs.size(-1))
             targets_flat = target_ids.view(-1)
@@ -180,9 +163,9 @@ def main():
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
-    parser.add_argument("--max_utr5_len", type=int, default=256)
-    parser.add_argument("--max_cds_len", type=int, default=1024)
-    parser.add_argument("--max_utr3_len", type=int, default=256)
+    parser.add_argument("--max_utr5_len", type=int, default=128)
+    parser.add_argument("--max_cds_len", type=int, default=512)
+    parser.add_argument("--max_utr3_len", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5)
