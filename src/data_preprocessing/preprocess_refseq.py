@@ -57,9 +57,9 @@ if __name__ == "__main__":
                 acc = rec.id  # e.g., NM_000123.4
 
                 records.append({
-                    "utr5": str(five_utr),
+                    "utr5": str(utr5),
                     "cds": str(cds_seq),
-                    "utr3": str(three_utr),
+                    "utr3": str(utr3),
                     "accession": acc,
                     "source_file": path.name,
                 })
