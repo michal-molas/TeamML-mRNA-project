@@ -9,13 +9,41 @@ from tqdm import tqdm
 import wandb
 
 class MRNACsvDataset(Dataset):
-    def __init__(self, csv_path, max_len=1024, mask_prob=0.15):
+    def __init__(
+        self,
+        csv_path,
+        max_utr5_len=2048,
+        max_cds_len=8192,
+        max_utr3_len=2048,
+    ):
         self.df = pd.read_csv(csv_path)
-        self.max_len = max_len
-        self.mask_prob = mask_prob
-        self.vocab = {'A': 0, 'C': 1, 'G': 2, 'U': 3, 'T': 3, '<PAD>': 4, '[MASK]': 5}
+        self.max_utr5_len = max_utr5_len
+        self.max_cds_len = max_cds_len
+        self.max_utr3_len = max_utr3_len
+        # input length after teacher-forced shift (full sequence length - 1)
+        self.max_len = max_utr5_len + max_cds_len + max_utr3_len + 6
+        self.vocab = {
+            'A': 0,
+            'C': 1,
+            'G': 2,
+            'U': 3,
+            'T': 3,
+            '<PAD>': 4,
+            '<BOS>': 5,
+            '<SEP>': 6,
+            '<EOS>': 7,
+            '<CDS>': 8,
+            '<UTR5>': 9,
+            '<UTR3>': 10,
+        }
+        self.vocab_size = len(set(self.vocab.values()))
         self.pad_id = self.vocab['<PAD>']
-        self.mask_id = self.vocab['[MASK]']
+        self.bos_id = self.vocab['<BOS>']
+        self.sep_id = self.vocab['<SEP>']
+        self.eos_id = self.vocab['<EOS>']
+        self.cds_id = self.vocab['<CDS>']
+        self.utr5_id = self.vocab['<UTR5>']
+        self.utr3_id = self.vocab['<UTR3>']
 
     def __len__(self):
         return len(self.df)
@@ -27,44 +55,51 @@ class MRNACsvDataset(Dataset):
         row = self.df.iloc[idx]
         utr5_str = str(row["utr5"]).upper()
         cds_str = str(row["cds"]).upper()
+        utr3_str = str(row["utr3"]).upper()
 
-        utr5_tokens = self.tokenize(utr5_str)
-        cds_tokens = self.tokenize(cds_str)
+        utr5_tokens = self.tokenize(utr5_str)[:self.max_utr5_len]
+        cds_tokens = self.tokenize(cds_str)[:self.max_cds_len]
+        utr3_tokens = self.tokenize(utr3_str)[:self.max_utr3_len]
 
-        utr5_regions = [0] * len(utr5_tokens)
-        cds_regions = [1] * len(cds_tokens)
+        prefix_tokens = [self.bos_id, self.cds_id] + cds_tokens + [self.sep_id]
+        target_tokens = [self.utr5_id] + utr5_tokens + [self.sep_id] + [self.utr3_id] + utr3_tokens + [self.eos_id]
+        full_tokens = (prefix_tokens + target_tokens)[: self.max_len + 1]
 
-        input_ids = utr5_tokens + cds_tokens
-        region_ids = utr5_regions + cds_regions
+        if len(full_tokens) < 2:
+            empty_long = torch.full((self.max_len,), self.pad_id, dtype=torch.long)
+            empty_mask = torch.zeros(self.max_len, dtype=torch.float)
+            empty_padding = torch.ones(self.max_len, dtype=torch.bool)
+            return empty_long, empty_long.clone(), empty_long.clone(), empty_mask, empty_padding
 
-        if len(input_ids) > self.max_len:
-            input_ids = input_ids[:self.max_len]
-            region_ids = region_ids[:self.max_len]
+        # region ids: 0=utr5, 1=cds, 2=utr3, 3=special/pad
+        prefix_regions = [3, 3] + [1] * len(cds_tokens) + [3]
+        target_regions = [3] + [0] * len(utr5_tokens) + [3] + [3] + [2] * len(utr3_tokens) + [3]
+        full_regions = (prefix_regions + target_regions)[: len(full_tokens)]
+
+        generation_start_idx = min(len(prefix_tokens), len(full_tokens) - 1)
+        full_loss_mask = [0] * generation_start_idx + [1] * (len(full_tokens) - generation_start_idx)
+
+        input_ids = full_tokens[:-1]
+        target_ids = full_tokens[1:]
+        region_ids = full_regions[:-1]
+        loss_mask = full_loss_mask[1:]
 
         seq_len = len(input_ids)
         padding_length = self.max_len - seq_len
 
         input_ids = torch.tensor(input_ids + [self.pad_id] * padding_length, dtype=torch.long)
+        target_ids = torch.tensor(target_ids + [self.pad_id] * padding_length, dtype=torch.long)
         region_ids = torch.tensor(region_ids + [3] * padding_length, dtype=torch.long)
-        
-        target_ids = input_ids.clone()
+        loss_mask = torch.tensor(loss_mask + [0] * padding_length, dtype=torch.float)
 
         padding_mask = torch.zeros(self.max_len, dtype=torch.bool)
         if padding_length > 0:
             padding_mask[-padding_length:] = True
 
-        loss_mask = torch.zeros(self.max_len, dtype=torch.float)
-        
-        utr5_len = min(len(utr5_tokens), self.max_len)
-        mask_indices = torch.rand(utr5_len) < self.mask_prob
-        
-        input_ids[:utr5_len][mask_indices] = self.mask_id
-        loss_mask[:utr5_len][mask_indices] = 1.0
-
         return input_ids, region_ids, target_ids, loss_mask, padding_mask
 
 class MaskedRNAGenerator(nn.Module):
-    def __init__(self, vocab_size=6, d_model=256, nhead=8, num_layers=4, max_len=1024):
+    def __init__(self, vocab_size, d_model, nhead, num_layers, max_len):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.pos_embedding = nn.Embedding(max_len, d_model)
@@ -85,19 +120,27 @@ class MaskedRNAGenerator(nn.Module):
         reg_emb = self.region_embedding(region_ids)
         
         hidden = x_emb + pos_emb + reg_emb
-        out = self.transformer(hidden, src_key_padding_mask=padding_mask)
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1
+        )
+        out = self.transformer(hidden, mask=causal_mask, src_key_padding_mask=padding_mask)
         return self.seq_head(out)
 
 def train(args, device):
-    dataset = MRNACsvDataset(csv_path=args.csv_path, max_len=args.max_len)
+    dataset = MRNACsvDataset(
+        csv_path=args.csv_path,
+        max_utr5_len=args.max_utr5_len,
+        max_cds_len=args.max_cds_len,
+        max_utr3_len=args.max_utr3_len,
+    )
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
     model = MaskedRNAGenerator(
-        vocab_size=6, 
-        d_model=args.d_model, 
-        nhead=args.n_heads, 
+        vocab_size=dataset.vocab_size,
+        d_model=args.d_model,
+        nhead=args.n_heads,
         num_layers=args.n_layers,
-        max_len=args.max_len
+        max_len=dataset.max_len,
     ).to(device)
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
@@ -137,7 +180,9 @@ def main():
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
-    parser.add_argument("--max_len", type=int, default=1024)
+    parser.add_argument("--max_utr5_len", type=int, default=256)
+    parser.add_argument("--max_cds_len", type=int, default=1024)
+    parser.add_argument("--max_utr3_len", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5)
