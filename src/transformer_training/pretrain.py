@@ -175,7 +175,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.wandb:
-        wandb.init(project="mrna-masked-lm", config=vars(args))
+        wandb.init(project="teamml-project-poc-transformer", config=vars(args))
 
     train(args, device)
 
