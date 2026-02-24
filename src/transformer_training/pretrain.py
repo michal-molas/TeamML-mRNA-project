@@ -45,25 +45,47 @@ class MRNACsvDataset(Dataset):
         self.utr5_id = self.vocab['<UTR5>']
         self.utr3_id = self.vocab['<UTR3>']
 
+        self.tokenized_samples = []
+        self.skipped_count = 0
+        self.max_skip_logs = 20
+
+        for i, row in self.df.iterrows():
+            utr5_tokens = self.tokenize(str(row["utr5"]).upper())
+            cds_tokens = self.tokenize(str(row["cds"]).upper())
+            utr3_tokens = self.tokenize(str(row["utr3"]).upper())
+            utr5_len = len(utr5_tokens)
+            cds_len = len(cds_tokens)
+            utr3_len = len(utr3_tokens)
+
+            if (
+                utr5_len > self.max_utr5_len
+                or cds_len > self.max_cds_len
+                or utr3_len > self.max_utr3_len
+            ):
+                self.skipped_count += 1
+                if self.skipped_count <= self.max_skip_logs:
+                    print(
+                        f"[skip] idx={i} lengths(utr5={utr5_len}, cds={cds_len}, utr3={utr3_len}) "
+                        f"exceed limits ({self.max_utr5_len}, {self.max_cds_len}, {self.max_utr3_len})"
+                    )
+                continue
+
+            self.tokenized_samples.append((utr5_tokens, cds_tokens, utr3_tokens))
+
+        print(f"[dataset] kept={len(self.tokenized_samples)} skipped={self.skipped_count}")
+
     def __len__(self):
-        return len(self.df)
+        return len(self.tokenized_samples)
 
     def tokenize(self, seq):
         return [self.vocab.get(n, self.pad_id) for n in seq]
 
     def __getitem__(self, idx):
-        row = self.df.iloc[idx]
-        utr5_str = str(row["utr5"]).upper()
-        cds_str = str(row["cds"]).upper()
-        utr3_str = str(row["utr3"]).upper()
-
-        utr5_tokens = self.tokenize(utr5_str)[:self.max_utr5_len]
-        cds_tokens = self.tokenize(cds_str)[:self.max_cds_len]
-        utr3_tokens = self.tokenize(utr3_str)[:self.max_utr3_len]
+        utr5_tokens, cds_tokens, utr3_tokens = self.tokenized_samples[idx]
 
         prefix_tokens = [self.bos_id, self.cds_id] + cds_tokens + [self.sep_id]
         target_tokens = [self.utr5_id] + utr5_tokens + [self.sep_id] + [self.utr3_id] + utr3_tokens + [self.eos_id]
-        full_tokens = (prefix_tokens + target_tokens)[: self.max_len + 1]
+        full_tokens = prefix_tokens + target_tokens
 
         generation_start_idx = len(prefix_tokens)
         full_loss_mask = [0] * generation_start_idx + [1] * (len(full_tokens) - generation_start_idx)
