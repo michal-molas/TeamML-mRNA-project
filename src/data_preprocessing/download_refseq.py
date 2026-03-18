@@ -4,7 +4,7 @@ import requests
 from tqdm import tqdm
 
 SAVE_DIR = Path("data/refseq")
-REFSEQ_FTP_URLS = {
+REFSEQ_URLS = {
     "vertebrate_mammalian": "https://ftp.ncbi.nlm.nih.gov/refseq/release/vertebrate_mammalian/",
     "vertebrate_other": "https://ftp.ncbi.nlm.nih.gov/refseq/release/vertebrate_other/",
 }
@@ -46,7 +46,7 @@ if __name__ == "__main__":
 
 
     print("Downloading GBFF files for each dataset...")
-    for dataset, dataset_url in REFSEQ_FTP_URLS.items():
+    for dataset, dataset_url in REFSEQ_URLS.items():
         print(f"Processing dataset: {dataset}")
         gbff_urls = get_gbff_urls(dataset_url)
         print(f"  Found {len(gbff_urls)} GBFF files for {dataset}")
