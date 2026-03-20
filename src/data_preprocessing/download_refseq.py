@@ -8,27 +8,29 @@ REFSEQ_URLS = {
     "vertebrate_mammalian": "https://ftp.ncbi.nlm.nih.gov/refseq/release/vertebrate_mammalian/",
     "vertebrate_other": "https://ftp.ncbi.nlm.nih.gov/refseq/release/vertebrate_other/",
 }
+# gbff or fna
+DATA_FORMAT = "fna"
 
 
-def get_gbff_urls(dataset_url: str) -> list[str]:
+def get_files_urls(dataset_url: str) -> list[str]:
     response = requests.get(dataset_url)
     text = response.text
 
-    gbff_urls = []
+    file_urls = []
     for line in text.splitlines():
-        if "rna.gbff" in line:
+        if f"rna.{DATA_FORMAT}" in line:
             match = re.search(r'href="([^"]+)"', line)
             if match:
                 filename = match.group(1)
                 full_url = dataset_url + filename
-                gbff_urls.append(full_url)
+                file_urls.append(full_url)
 
-    return gbff_urls
+    return file_urls
 
 
-def download_gbff(gbff_url: str, save_path: Path) -> None:
+def download_file(file_url: str, save_path: Path) -> None:
     """Download a large file with a progress bar."""
-    response = requests.get(gbff_url, stream=True)
+    response = requests.get(file_url, stream=True)
     total_size = int(response.headers.get("content-length", 0))
     with open(save_path, "wb") as f, tqdm(
         desc=save_path.name,
@@ -43,16 +45,15 @@ def download_gbff(gbff_url: str, save_path: Path) -> None:
 
 
 if __name__ == "__main__":
+    print("Selected data format:", DATA_FORMAT)
 
-
-    print("Downloading GBFF files for each dataset...")
     for dataset, dataset_url in REFSEQ_URLS.items():
         print(f"Processing dataset: {dataset}")
-        gbff_urls = get_gbff_urls(dataset_url)
-        print(f"  Found {len(gbff_urls)} GBFF files for {dataset}")
+        file_urls = get_files_urls(dataset_url)
+        print(f"  Found {len(file_urls)} files for {dataset}")
 
-        for gbff_url in tqdm(gbff_urls, desc=f"Downloading GBFF files for {dataset}"):
-            filename = gbff_url.split("/")[-1]
+        for file_url in tqdm(file_urls, desc=f"Downloading files for {dataset}"):
+            filename = file_url.split("/")[-1]
             save_path = SAVE_DIR / dataset / filename
             save_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -61,5 +62,5 @@ if __name__ == "__main__":
                 print(f"  {save_path} already exists, skipping download.")
                 continue
 
-            print(f"Downloading {gbff_url} to {save_path}...")
-            download_gbff(gbff_url, save_path)
+            print(f"Downloading {file_url} to {save_path}...")
+            download_file(file_url, save_path)
