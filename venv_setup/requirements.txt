@@ -1,0 +1,8 @@
+# Add here the pip packages you would like to install on this virtual environment / kernel
+pip
+wandb
+torch
+pandas
+tqdm
+Bio
+ipykernel

@@ -152,6 +152,8 @@ def train(args, device):
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
 
+    print(f"Dataset length: {len(dataloader)}")
+
     model.train()
     for epoch in range(args.epochs):
         for step, (input_ids, target_ids, loss_mask, padding_mask) in tqdm(list(enumerate(dataloader))):
@@ -185,9 +187,9 @@ def main():
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
-    parser.add_argument("--max_utr5_len", type=int, default=128)
-    parser.add_argument("--max_cds_len", type=int, default=512)
-    parser.add_argument("--max_utr3_len", type=int, default=128)
+    parser.add_argument("--max_utr5_len", type=int, default=4048)
+    parser.add_argument("--max_cds_len", type=int, default=8192)
+    parser.add_argument("--max_utr3_len", type=int, default=4048)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5)
@@ -197,7 +199,10 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.wandb:
-        wandb.init(project="teamml-project-poc-transformer", config=vars(args))
+        wandb.init(
+            project="teamml-project-poc-transformer",
+            config=vars(args),
+        )
 
     train(args, device)
 
