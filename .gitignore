@@ -4,6 +4,7 @@ data
 __pycache__/
 *.py[codz]
 *$py.class
+*.gz
 
 # C extensions
 *.so
@@ -207,3 +208,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# macOS
+.DS_Store
