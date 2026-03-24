@@ -15,13 +15,19 @@ class MRNACsvDataset(Dataset):
         max_utr5_len=2048,
         max_cds_len=8192,
         max_utr3_len=2048,
+        only_utr5=False,
     ):
         self.df = pd.read_csv(csv_path)
         self.max_utr5_len = max_utr5_len
         self.max_cds_len = max_cds_len
         self.max_utr3_len = max_utr3_len
+        self.only_utr5 = only_utr5
         # full sequence length - 1 (because we shift by 1 when comparing input_ids and target_ids)
-        self.max_len = (max_utr5_len + max_cds_len + max_utr3_len + 7) - 1
+        # <BOS> + <CDS> + cds + <UTR5> + utr5 + [<UTR3> + utr3] + <EOS>
+        if self.only_utr5:
+            self.max_len = (max_utr5_len + max_cds_len + 4) - 1
+        else:
+            self.max_len = (max_utr5_len + max_cds_len + max_utr3_len + 5) - 1
         self.vocab = {
             'A': 0,
             'C': 1,
@@ -30,43 +36,53 @@ class MRNACsvDataset(Dataset):
             'T': 3,
             '<PAD>': 4,
             '<BOS>': 5,
-            '<SEP>': 6,
-            '<EOS>': 7,
-            '<CDS>': 8,
-            '<UTR5>': 9,
-            '<UTR3>': 10,
+            '<EOS>': 6,
+            '<CDS>': 7,
+            '<UTR5>': 8,
         }
+
+        if not self.only_utr5:
+            self.vocab['<UTR3>'] = 9
+
         self.vocab_size = len(set(self.vocab.values()))
         self.pad_id = self.vocab['<PAD>']
         self.bos_id = self.vocab['<BOS>']
-        self.sep_id = self.vocab['<SEP>']
         self.eos_id = self.vocab['<EOS>']
         self.cds_id = self.vocab['<CDS>']
         self.utr5_id = self.vocab['<UTR5>']
-        self.utr3_id = self.vocab['<UTR3>']
+        self.utr3_id = self.vocab['<UTR3>'] if not self.only_utr5 else None
 
         self.tokenized_samples = []
         self.skipped_count = 0
         self.max_skip_logs = 20
 
         for i, row in self.df.iterrows():
-            utr5_tokens = self.tokenize(str(row["utr5"]).upper())
-            cds_tokens = self.tokenize(str(row["cds"]).upper())
-            utr3_tokens = self.tokenize(str(row["utr3"]).upper())
+            # 5'UTR generation should be right-to-left, hence the reverse
+            # UTRs are trimmed to max length, mrna is skipped if CDS is too long
+            utr5_str = str(row["utr5"])[::-1][:self.max_utr5_len].upper()
+            cds_str = str(row["cds"]).upper()
+            utr3_str = str(row["utr3"])[:self.max_utr3_len].upper()
+
+            utr5_tokens = self.tokenize(utr5_str)
+            cds_tokens = self.tokenize(cds_str)
+            utr3_tokens = self.tokenize(utr3_str)
             utr5_len = len(utr5_tokens)
             cds_len = len(cds_tokens)
             utr3_len = len(utr3_tokens)
 
-            if (
-                utr5_len > self.max_utr5_len
-                or cds_len > self.max_cds_len
-                or utr3_len > self.max_utr3_len
-            ):
+            if cds_len > self.max_cds_len:
                 self.skipped_count += 1
                 if self.skipped_count <= self.max_skip_logs:
                     print(
-                        f"[skip] idx={i} lengths(utr5={utr5_len}, cds={cds_len}, utr3={utr3_len}) "
-                        f"exceed limits ({self.max_utr5_len}, {self.max_cds_len}, {self.max_utr3_len})"
+                        f"[skip] idx={i} CDS length exceeds limit of {self.max_cds_len}"
+                    )
+                continue
+
+            if utr5_len + cds_len + (0 if self.only_utr5 else utr3_len) >= self.max_len:
+                self.skipped_count += 1
+                if self.skipped_count <= self.max_skip_logs:
+                    print(
+                        f"[skip] idx={i} total length exceeds limit of {self.max_len}"
                     )
                 continue
 
@@ -83,8 +99,16 @@ class MRNACsvDataset(Dataset):
     def __getitem__(self, idx):
         utr5_tokens, cds_tokens, utr3_tokens = self.tokenized_samples[idx]
 
-        prefix_tokens = [self.bos_id, self.cds_id] + cds_tokens + [self.sep_id]
-        target_tokens = [self.utr5_id] + utr5_tokens + [self.sep_id] + [self.utr3_id] + utr3_tokens + [self.eos_id]
+        # Prefix: <BOS> + <CDS> + CDS_tokens
+        prefix_tokens = [self.bos_id, self.cds_id] + cds_tokens
+        # Target: <UTR5> + UTR5_tokens + [<UTR3> + UTR3_tokens] + <EOS>
+        target_tokens = [self.utr5_id] + utr5_tokens
+        if not self.only_utr5:
+            target_tokens += [self.utr3_id] + utr3_tokens
+            
+        target_tokens += [self.eos_id]
+        
+
         full_tokens = prefix_tokens + target_tokens
 
         generation_start_idx = len(prefix_tokens)
@@ -133,12 +157,13 @@ class MRNATransformer(nn.Module):
         out = self.transformer(hidden, mask=causal_mask, src_key_padding_mask=padding_mask)
         return self.seq_head(out)
 
-def train(args, device):
+def train(args, device, only_utr5=False):
     dataset = MRNACsvDataset(
         csv_path=args.csv_path,
         max_utr5_len=args.max_utr5_len,
         max_cds_len=args.max_cds_len,
         max_utr3_len=args.max_utr3_len,
+        only_utr5=only_utr5,
     )
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
 
@@ -174,10 +199,10 @@ def train(args, device):
             loss.backward()
             optimizer.step()
 
-            if step % 10 == 0:
-                print(f"Epoch: {epoch}, Step: {step}, Loss: {loss.item()}")
-                if args.wandb:
-                    wandb.log({"train/loss": loss.item()})
+            if args.wandb and step % 10 == 0:
+                wandb.log({"train/loss": loss.item()})
+        
+        print(f"Epoch: {epoch}, Loss: {loss.item()}")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -199,7 +224,7 @@ def main():
     if args.wandb:
         wandb.init(project="teamml-project-poc-transformer", config=vars(args))
 
-    train(args, device)
+    train(args, device, True)
 
     if args.wandb:
         wandb.finish()
