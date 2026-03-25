@@ -1,15 +1,15 @@
 import argparse
+import sys
 
+import wandb
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from torch.optim import AdamW
 from tqdm import tqdm
 from dotenv import load_dotenv
-
-import wandb
 
 class MRNACsvDataset(Dataset):
     def __init__(
@@ -136,6 +136,34 @@ class MRNATransformer(nn.Module):
         out = self.transformer(hidden, mask=causal_mask, src_key_padding_mask=padding_mask)
         return self.seq_head(out)
 
+def compute_validation_loss(args, model, valid_dataloader, global_step, device):
+    model.eval()
+    val_loss = 0.0
+
+    with torch.no_grad():
+        for step, (input_ids, target_ids, loss_mask, padding_mask) in list(enumerate(valid_dataloader)):
+            input_ids = input_ids.to(device)
+            target_ids = target_ids.to(device)
+            loss_mask = loss_mask.to(device)
+            padding_mask = padding_mask.to(device)
+
+            outputs = model(input_ids, padding_mask=padding_mask)
+            
+            outputs_flat = outputs.view(-1, outputs.size(-1))
+            targets_flat = target_ids.view(-1)
+            
+            loss = F.cross_entropy(outputs_flat, targets_flat, reduction='none')
+            val_loss += (loss * loss_mask.view(-1)).sum() / (loss_mask.sum() + 1e-8)
+
+    val_loss /= len(valid_dataloader)
+
+    print(f"Validation Loss: {val_loss.item()}", file=sys.stderr)
+    if args.wandb:
+        wandb.log(
+            {"valid/loss": val_loss.item()},
+            step=global_step,
+        )
+
 def train(args, device):
     dataset = MRNACsvDataset(
         csv_path=args.csv_path,
@@ -143,7 +171,21 @@ def train(args, device):
         max_cds_len=args.max_cds_len,
         max_utr3_len=args.max_utr3_len,
     )
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+
+    dataset_size = len(dataset)
+
+    val_size = int(0.2 * dataset_size)
+    train_size = dataset_size - val_size
+
+    train_dataset, val_dataset = random_split(
+        dataset, [train_size, val_size]
+    )
+
+    print(f"Train dataset length: {len(train_dataset)}", file=sys.stderr)
+    print(f"Validation dataset length: {len(val_dataset)}", file=sys.stderr)
+
+    dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    valid_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
 
     model = MRNATransformer(
         vocab_size=dataset.vocab_size,
@@ -153,12 +195,12 @@ def train(args, device):
         max_len=dataset.max_len,
     ).to(device)
 
+    global_step = 0
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
 
-    print(f"Dataset length: {len(dataloader)}")
-
-    model.train()
     for epoch in range(args.epochs):
+        model.train()
+
         for step, (input_ids, target_ids, loss_mask, padding_mask) in tqdm(list(enumerate(dataloader))):
             input_ids = input_ids.to(device)
             target_ids = target_ids.to(device)
@@ -179,10 +221,17 @@ def train(args, device):
             loss.backward()
             optimizer.step()
 
+            global_step += 1
+
             if step % 100 == 0:
                 print(f"Epoch: {epoch}, Step: {step}, Loss: {loss.item()}")
                 if args.wandb:
-                    wandb.log({"train/loss": loss.item()})
+                    wandb.log(
+                        {"train/loss": loss.item()},
+                        step=global_step,
+                    )
+
+        compute_validation_loss(args, model, valid_dataloader, global_step, device)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -193,7 +242,7 @@ def main():
     parser.add_argument("--max_utr5_len", type=int, default=200)
     parser.add_argument("--max_cds_len", type=int, default=500)
     parser.add_argument("--max_utr3_len", type=int, default=10)
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--wandb", action="store_true")
@@ -205,7 +254,7 @@ def main():
 
     if args.wandb:
         wandb.init(
-            project="transformer-pretraining",
+            project="transformer-parameter-grid",
             config=vars(args),
             dir='../../logs',
         )

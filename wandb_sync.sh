@@ -2,7 +2,7 @@
 echo "Syncing:"
 while true
 do 
-    wandb sync logs/wandb/latest-run
+    wandb sync logs/wandb/offline-run-*
     echo "..."
     sleep 60
 done
