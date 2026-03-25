@@ -1,4 +1,5 @@
 import argparse
+
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -6,6 +7,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from tqdm import tqdm
+from dotenv import load_dotenv
+
 import wandb
 
 class MRNACsvDataset(Dataset):
@@ -176,21 +179,21 @@ def train(args, device):
             loss.backward()
             optimizer.step()
 
-            if step % 10 == 0:
+            if step % 100 == 0:
                 print(f"Epoch: {epoch}, Step: {step}, Loss: {loss.item()}")
                 if args.wandb:
                     wandb.log({"train/loss": loss.item()})
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--csv_path", type=str, default="../data_preprocessing/data/refseq/refseq_transcripts.csv")
+    parser.add_argument("--csv_path", type=str, default="../../data/pretraining/pretraining_refseq.csv")
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
-    parser.add_argument("--max_utr5_len", type=int, default=4048)
-    parser.add_argument("--max_cds_len", type=int, default=8192)
-    parser.add_argument("--max_utr3_len", type=int, default=4048)
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--max_utr5_len", type=int, default=200)
+    parser.add_argument("--max_cds_len", type=int, default=500)
+    parser.add_argument("--max_utr3_len", type=int, default=10)
+    parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--wandb", action="store_true")
@@ -198,10 +201,13 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    load_dotenv()
+
     if args.wandb:
         wandb.init(
-            project="teamml-project-poc-transformer",
+            project="transformer-pretraining",
             config=vars(args),
+            dir='../../logs',
         )
 
     train(args, device)
