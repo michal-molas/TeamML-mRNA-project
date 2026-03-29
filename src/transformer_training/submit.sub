@@ -1,22 +1,17 @@
-#!/bin/bash
-#SBATCH --job-name=bml_project_2gpu
-#SBATCH --nodes=1
-#SBATCH --time=00:05:00
-#SBATCH --account=plgpkattenion-gpu-a100
-#SBATCH --partition=plgrid-gpu-a100
-#SBATCH --gres=gpu:2
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=125G
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
+#!/bin/bash -x
+#SBATCH --account=hai_1223  	 	     # Account details
+#SBATCH --cpus-per-task=48
+#SBATCH --gres=gpu:1                     # Use the 4 GPUs available
+#SBATCH --output=out/output.%j               # File for standard output
+#SBATCH --error=err/error.%j                 # File for standard error
+#SBATCH --time=02:00:00                  # Maximum runtime
+#SBATCH --partition=booster              # Specified machine partition
 
-cd /net/tscratch/people/plgmbmolas/
-source venv/bin/activate
+# To get number of cpu per task
+export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
 
-torchrun --nnodes=1 --nproc_per_node=2 main.py \
-  --n_layers 4 \
-  --d_model 256 \
-  --n_heads 4 \
-  --batch_size 64 \
-  --n_training_steps 1000
+# activate env
+source ../../venv_setup/activate.sh
+
+# run script 
+time srun python3 pretrain.py --wandb
