@@ -2,6 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 import torch
+from dotenv import load_dotenv
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
@@ -72,7 +73,6 @@ def build_ribonn_input(
     cds_lens,
     utr3_lens,
     ribonn_max_len,
-    tau,
     label_codons=True,
 ):
     """
@@ -90,7 +90,7 @@ def build_ribonn_input(
     out = torch.zeros(batch_size, num_channels, ribonn_max_len, device=device)
 
     # Nucleotide channels 0-3 already match RiboNN, but we have to drop special-token logits
-    soft_nt = F.gumbel_softmax(lm_logits, tau=tau, hard=False)[:, :, :4]
+    soft_nt = F.gumbel_softmax(lm_logits)[:, :, :4]
 
     for i in range(batch_size):
         utr5_len = int(utr5_lens[i].item())
@@ -143,46 +143,44 @@ def load_pretrained_weights(model, checkpoint_path, device):
 
 
 def train(args, device):
-    full_dataset = MRNACsvDataset(
+    dataset = MRNACsvDataset(
         csv_path=args.csv_path,
         max_utr5_len=args.max_utr5_len,
         max_cds_len=args.max_cds_len,
         max_utr3_len=args.max_utr3_len,
     )
 
-    val_size = max(1, int(len(full_dataset) * args.val_fraction))
-    train_size = len(full_dataset) - val_size
+    dataset_size = len(dataset)
+
+    val_size = int(0.2 * dataset_size)
+    train_size = dataset_size - val_size
     train_dataset, val_dataset = random_split(
-        full_dataset,
+        dataset,
         [train_size, val_size],
         generator=torch.Generator().manual_seed(args.seed),
     )
+
+    print(f"Train dataset length: {len(train_dataset)}", file=sys.stderr)
+    print(f"Validation dataset length: {len(val_dataset)}", file=sys.stderr)
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
     model = MRNATransformer(
-        vocab_size=full_dataset.vocab_size,
+        vocab_size=dataset.vocab_size,
         d_model=args.d_model,
         nhead=args.n_heads,
         num_layers=args.n_layers,
-        max_len=full_dataset.max_len,
+        max_len=dataset.max_len,
     ).to(device)
 
-    if args.pretrained_path:
-        load_pretrained_weights(model, args.pretrained_path, device)
+    load_pretrained_weights(model, args.pretrained_path, device)
 
-    # ── Load frozen RiboNN ──────────────────────────────────────────────────
-    ribonn_model = None
-    ribonn_max_len = None
-    if args.ribonn_weights:
-        ribonn_model, ribonn_max_len = load_ribonn(args.ribonn_weights, device)
-        print(f"[ribonn] frozen scorer active  max_tx_len={ribonn_max_len}")
-    else:
-        print("[ribonn] --ribonn_weights not set; RiboNN loss disabled")
+    ribonn_model, ribonn_max_len = load_ribonn(args.ribonn_weights, device)
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
 
+    global_step = 0
     best_val_lm = float("inf")
     for epoch in range(args.epochs):
         model.train()
@@ -195,19 +193,20 @@ def train(args, device):
             utr5_lens = batch["utr5_len"]
             cds_lens = batch["cds_len"]
             utr3_lens = batch["utr3_len"]
+            te_label = batch["te_label"]
 
             optimizer.zero_grad()
             lm_logits = model(input_ids, padding_mask=padding_mask)
 
-            # LM loss: masked cross-entropy on generated tokens (same as pretrain)
-            lm_loss = F.cross_entropy(
-                lm_logits.view(-1, lm_logits.size(-1)),
-                target_ids.view(-1),
-                reduction="none",
-            )
+            # LM loss
+            outputs_flat = lm_logits.view(-1, lm_logits.size(-1))
+            targets_flat = target_ids.view(-1)
+            
+            lm_loss = F.cross_entropy(outputs_flat, targets_flat, reduction='none')
+
             lm_loss = (lm_loss * loss_mask.view(-1)).sum() / (loss_mask.sum() + 1e-8)
 
-            # RiboNN loss: push generated sequences toward higher TE
+            # RiboNN loss
             ribonn_loss = torch.tensor(0.0, device=device)
             ribonn_input = build_ribonn_input(
                 lm_logits,
@@ -216,23 +215,26 @@ def train(args, device):
                 cds_lens,
                 utr3_lens,
                 ribonn_max_len,
-                args.gumbel_tau,
                 label_codons=RIBONN_CONFIG["label_codons"],
             )
-            te_pred = ribonn_model(ribonn_input)  # (N, 1)
-            ribonn_loss = -te_pred.mean()  # maximise TE
+            te_pred = ribonn_model(ribonn_input)
+            # TODO: What if te_pred is better than the te_label, should we use sth like relu here?
+            ribonn_loss = F.mse_loss(te_pred.squeeze(-1), te_label)
 
             loss = lm_loss + args.lambda_ribonn * ribonn_loss
             loss.backward()
             optimizer.step()
 
-            if args.wandb and step % 10 == 0:
+            global_step += 1
+
+            if args.wandb and step % 100 == 0:
                 wandb.log(
                     {
                         "train/loss": loss.item(),
                         "train/lm_loss": lm_loss.item(),
                         "train/ribonn_loss": ribonn_loss.item(),
-                    }
+                    },
+                    step=global_step,
                 )
 
         # ── Validation (LM loss only — RiboNN scoring is eval-time) ────────
@@ -264,17 +266,12 @@ def train(args, device):
         )
 
         if args.wandb:
-            wandb.log({"val/lm_loss": val_lm, "epoch": epoch})
+            wandb.log({"val/lm_loss": val_lm, "epoch": epoch}, step=global_step)
 
         if val_lm < best_val_lm:
             best_val_lm = val_lm
             torch.save(model.state_dict(), args.output_path)
             print(f"[checkpoint] saved → {args.output_path}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def main():
@@ -286,10 +283,9 @@ def main():
         "--pretrained_path",
         type=str,
         default=None,
-        help="Path to pretrain.py checkpoint to initialise the LM backbone",
+        help="Path to pretrain.py checkpoint",
     )
     parser.add_argument("--output_path", type=str, default="finetune_best.pt")
-    # RiboNN differentiable scorer
     parser.add_argument(
         "--ribonn_weights",
         type=str,
@@ -300,34 +296,32 @@ def main():
         "--lambda_ribonn",
         type=float,
         default=1.0,
-        help="Weight of RiboNN loss (negative TE) relative to LM loss",
+        help="Weight of RiboNN loss relative to LM loss",
     )
-    parser.add_argument(
-        "--gumbel_tau",
-        type=float,
-        default=1.0,
-        help="Gumbel-softmax temperature; lower = sharper / more discrete",
-    )
-    # Model architecture
+
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--max_utr5_len", type=int, default=128)
     parser.add_argument("--max_cds_len", type=int, default=512)
     parser.add_argument("--max_utr3_len", type=int, default=128)
-    # Training
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--val_fraction", type=float, default=0.1)
+    parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--wandb", action="store_true")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    load_dotenv()
+
     if args.wandb:
-        wandb.init(project="teamml-ribonn-finetune", config=vars(args))
+        wandb.init(
+            project="teamml-ribonn-finetune",
+            config=vars(args),
+            dir='../../logs',
+        )
 
     train(args, device)
 
