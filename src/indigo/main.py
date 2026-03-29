@@ -36,14 +36,14 @@ class IndigoAttentionLayer(nn.Module):
 
         batch, seq_len = x.shape[:-1]
         q_chunk, k_chunk, v_chunk = torch.chunk(projected, chunks=3, dim=-1)
-        query = q_chunk.view(batch, seq_len, self.heads, -1).transpose(1, 2)
-        key = k_chunk.view(batch, seq_len, self.heads, -1).transpose(1, 2)
-        value = v_chunk.view(batch, seq_len, self.heads, -1).transpose(1, 2)
+        query = q_chunk.view(batch, seq_len, self.heads, -1)
+        key = k_chunk.view(batch, seq_len, self.heads, -1)
+        value = v_chunk.view(batch, seq_len, self.heads, -1)
 
         r += 1 # {-1, 0, 1} to valid indices {0, 1, 2}
-        R = self.relative_positional_embedding.weight[r] # shape: (seq_len, seq_len, dmodel)
+        R = self.relative_positional_embedding.weight[r] # shape: (batch, seq_len, seq_len, dmodel)
 
-        S = torch.einsum('ik,jk,ijk->ijk', query, key, R)
+        S = torch.einsum('bik,bjk,bijk->bijk', query, key, R)
         # instead of S[i, j] = Q[i] * K[j] in ordinary attention, we introduce relative position bias
         # S[i, j] = Q[i] * (K[j] + R[i, j])
 
@@ -56,17 +56,26 @@ class IndigoAttentionLayer(nn.Module):
 
         return output
 
-class DecodingLayer(nn.Module):
+class IndigoDecodingLayer(nn.Module):
 
-    def __init__(self, dmodel, vocab_size):
-        super(DecodingLayer, self).__init__()
+    def __init__(self, dmodel, vocab_size, seq_len):
+        super(IndigoDecodingLayer, self).__init__()
         
-        self.proj = nn.Linear(dmodel, dmodel, bias=False)
         self.dmodel = dmodel
         self.vocab_size = vocab_size
+        self.seq_len = seq_len
+
+        self.left_proj = nn.Linear(dmodel, dmodel, bias=False)
+        self.right_proj = nn.Linear(dmodel, dmodel, bias=False)
+        self.state_token_proj = nn.Linear(dmodel, dmodel, bias=False)
+        self.state_position_proj = nn.Linear(dmodel, dmodel, bias=False)
 
     def forward(self, H, embedding_matrix):
-        pass
+        
+        assert H.shape[-2:] == (self.seq_len, self.dmodel)
+        assert embedding_matrix.shape[-2] == (self.vocab_size, self.dmodel)
+
+        
 
 class IndigoTransformer(nn.Module):
 
