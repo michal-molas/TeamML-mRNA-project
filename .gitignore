@@ -1,7 +1,12 @@
+logs
+src/transformer_training/out
+src/transformer_training/err
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
 *$py.class
+*.gz
 
 # C extensions
 *.so
@@ -205,3 +210,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# macOS
+.DS_Store
