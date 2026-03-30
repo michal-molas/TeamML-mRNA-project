@@ -53,7 +53,6 @@ class MRNACsvDataset(Dataset):
 
         self.tokenized_samples = []
         self.skipped_count = 0
-        self.max_skip_logs = 20
 
         print("Loading dataset...")
         for i, row in tqdm(self.df.iterrows(), total=len(self.df)):
@@ -75,18 +74,10 @@ class MRNACsvDataset(Dataset):
 
             if cds_len > self.max_cds_len:
                 self.skipped_count += 1
-                if self.skipped_count <= self.max_skip_logs:
-                    print(
-                        f"[skip] idx={i} CDS length exceeds limit of {self.max_cds_len}"
-                    )
                 continue
 
             if utr5_len + cds_len + (0 if self.only_utr5 else utr3_len) >= self.max_len:
                 self.skipped_count += 1
-                if self.skipped_count <= self.max_skip_logs:
-                    print(
-                        f"[skip] idx={i} total length exceeds limit of {self.max_len}"
-                    )
                 continue
 
             te = float('nan')
@@ -111,7 +102,7 @@ class MRNACsvDataset(Dataset):
         # Prefix: <BOS> + <CDS> + CDS_tokens + <UTR5>
         prefix_tokens = [self.bos_id, self.cds_id] + cds_tokens + [self.utr5_id]
         # Target: UTR5_tokens + [<UTR3> + UTR3_tokens] + <EOS>
-        target_tokens = utr5_tokens
+        target_tokens = utr5_tokens.copy()
         if not self.only_utr5:
             target_tokens += [self.utr3_id] + utr3_tokens
         target_tokens += [self.eos_id]

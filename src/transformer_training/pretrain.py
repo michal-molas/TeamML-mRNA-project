@@ -145,7 +145,8 @@ def main():
             dir='../../logs',
         )
 
-    train(args, device, True)
+    only_utr5 = False
+    train(args, device, only_utr5)
 
     if args.wandb:
         wandb.finish()

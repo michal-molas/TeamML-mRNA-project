@@ -3,13 +3,14 @@ import sys
 from pathlib import Path
 import torch
 from dotenv import load_dotenv
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from torch.optim import AdamW
 from tqdm import tqdm
 import wandb
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "RiboNN"))
 from RiboNN.src.model import RiboNN
 from models import MRNACsvDataset, MRNATransformer
 
@@ -42,7 +43,6 @@ RIBONN_CONFIG = dict(
     num_targets=78,  # 78 for human, 68 for mouse
     max_shift=0, # conf.yml
     symmetric_shift=True, # conf.yml
-    device="cuda",
 )
 
 
@@ -221,7 +221,7 @@ def train(args, device):
             # TODO: How to compare the TE to the label? 
             #       Can our model output results better than the data (then maybe relu)?
             #       Maybe we should just try to maximize the TE and ignore the label?
-            ribonn_loss = F.mse_loss(te_pred.squeeze(-1), te_label)
+            ribonn_loss = F.mse_loss(te_pred.mean(dim=-1), te_label)
 
             loss = lm_loss + args.lambda_ribonn * ribonn_loss
             loss.backward()
@@ -271,7 +271,6 @@ def train(args, device):
                     cds_lens,
                     utr3_lens,
                     ribonn_max_len,
-                    args.gumbel_tau,
                     label_codons=RIBONN_CONFIG["label_codons"],
                 )
                 val_te_sum += ribonn_model(ribonn_input).mean().item()
@@ -306,7 +305,7 @@ def main():
         default=None,
         help="Path to pretrain.py checkpoint",
     )
-    parser.add_argument("--output_path", type=str, default="finetune_best.pt")
+    parser.add_argument("--output_path", type=str, default=None)
     parser.add_argument(
         "--ribonn_weights",
         type=str,
@@ -323,10 +322,10 @@ def main():
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
-    parser.add_argument("--max_utr5_len", type=int, default=128)
-    parser.add_argument("--max_cds_len", type=int, default=512)
-    parser.add_argument("--max_utr3_len", type=int, default=128)
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--max_utr5_len", type=int, default=200)
+    parser.add_argument("--max_cds_len", type=int, default=500)
+    parser.add_argument("--max_utr3_len", type=int, default=200)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
