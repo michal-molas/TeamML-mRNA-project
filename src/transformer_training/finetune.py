@@ -218,7 +218,9 @@ def train(args, device):
                 label_codons=RIBONN_CONFIG["label_codons"],
             )
             te_pred = ribonn_model(ribonn_input)
-            # TODO: What if te_pred is better than the te_label, should we use sth like relu here?
+            # TODO: How to compare the TE to the label? 
+            #       Can our model output results better than the data (then maybe relu)?
+            #       Maybe we should just try to maximize the TE and ignore the label?
             ribonn_loss = F.mse_loss(te_pred.squeeze(-1), te_label)
 
             loss = lm_loss + args.lambda_ribonn * ribonn_loss
@@ -237,9 +239,10 @@ def train(args, device):
                     step=global_step,
                 )
 
-        # ── Validation (LM loss only — RiboNN scoring is eval-time) ────────
         model.eval()
-        val_lm_sum = val_n = 0
+        val_loss_sum = 0
+        val_te_sum = 0
+        val_n = 0
         with torch.no_grad():
             for batch in val_loader:
                 batch = {k: v.to(device) for k, v in batch.items()}
@@ -247,6 +250,9 @@ def train(args, device):
                 target_ids = batch["target_ids"]
                 loss_mask = batch["loss_mask"]
                 padding_mask = batch["padding_mask"]
+                utr5_lens = batch["utr5_len"]
+                cds_lens = batch["cds_len"]
+                utr3_lens = batch["utr3_len"]
 
                 lm_logits = model(input_ids, padding_mask=padding_mask)
                 lm = F.cross_entropy(
@@ -255,18 +261,33 @@ def train(args, device):
                     reduction="none",
                 )
                 lm = (lm * loss_mask.view(-1)).sum() / (loss_mask.sum() + 1e-8)
-                val_lm_sum += lm.item()
+                val_loss_sum += lm.item()
+
+                discrete_logits = F.one_hot(lm_logits.argmax(-1), num_classes=lm_logits.size(-1)).float()
+                ribonn_input = build_ribonn_input(
+                    discrete_logits,
+                    input_ids,
+                    utr5_lens,
+                    cds_lens,
+                    utr3_lens,
+                    ribonn_max_len,
+                    args.gumbel_tau,
+                    label_codons=RIBONN_CONFIG["label_codons"],
+                )
+                val_te_sum += ribonn_model(ribonn_input).mean().item()
+
                 val_n += 1
 
-        val_lm = val_lm_sum / max(val_n, 1)
+        val_lm = val_loss_sum / val_n
+        val_te = val_te_sum / val_n
 
         print(
             f"Epoch {epoch} | train_lm={lm_loss.item():.4f} "
-            f"train_ribonn={ribonn_loss.item():.4f}  val_lm={val_lm:.4f}"
+            f"train_ribonn={ribonn_loss.item():.4f}  val_lm={val_lm:.4f}  val_te={val_te:.4f}"
         )
 
         if args.wandb:
-            wandb.log({"val/lm_loss": val_lm, "epoch": epoch}, step=global_step)
+            wandb.log({"val/lm_loss": val_lm, "val/te": val_te, "epoch": epoch}, step=global_step)
 
         if val_lm < best_val_lm:
             best_val_lm = val_lm
