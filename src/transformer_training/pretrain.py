@@ -17,11 +17,11 @@ def compute_validation_loss(args, model, valid_dataloader, global_step, device):
     val_loss = 0.0
 
     with torch.no_grad():
-        for step, (input_ids, target_ids, loss_mask, padding_mask) in list(enumerate(valid_dataloader)):
-            input_ids = input_ids.to(device)
-            target_ids = target_ids.to(device)
-            loss_mask = loss_mask.to(device)
-            padding_mask = padding_mask.to(device)
+        for step, batch in list(enumerate(valid_dataloader)):
+            input_ids = batch["input_ids"].to(device)
+            target_ids = batch["target_ids"].to(device)
+            loss_mask = batch["loss_mask"].to(device)
+            padding_mask = batch["padding_mask"].to(device)
 
             outputs = model(input_ids, padding_mask=padding_mask)
             
@@ -126,7 +126,7 @@ def main():
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--max_utr5_len", type=int, default=200)
     parser.add_argument("--max_cds_len", type=int, default=500)
-    parser.add_argument("--max_utr3_len", type=int, default=10)
+    parser.add_argument("--max_utr3_len", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5)
