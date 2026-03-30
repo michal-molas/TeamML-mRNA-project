@@ -1,0 +1,3 @@
+[submodule "RiboNN"]
+	path = RiboNN
+	url = https://github.com/Sanofi-Public/RiboNN
