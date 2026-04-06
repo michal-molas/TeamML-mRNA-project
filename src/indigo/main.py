@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import dataclasses 
 
 
 
@@ -198,11 +199,60 @@ def generate_greedy(model, cds_seq):
 
 
 
-def generate_beam_search(model, cds_seq, beam_size):
+def generate_beam_search(model, input_ids, beam_size, max_len):
     
     # inputs a CDS sequence
     # outputs generated UTR sequence
     # uses beam search as described in the indigo paper
+
+    # Each beam: (sequence, relative position matrix, score)
+    beams = [(input_ids, torch.zeros(1,), 0.0)]
+    completed = []
+
+    for t in range(max_len):
+
+        all_candidates = []
+
+        for seq, R, score in beams:
+
+            if seq[0, -1].item() == eod_token:
+                completed.append((seq, R, score))
+                continue
+
+            H, R = model.encoder(input_ids, seq, R)
+            Z = model.word_decoder(H, R) # next token probabilities
+
+            top_probs, top_tokens = torch.topk(Z, beam_size, dim=-1)
+
+            for prob, z in zip(top_probs, top_tokens):
+                new_seq = torch.cat([seq, z], dim=-1)
+                new_score = score + prob
+
+                P = model.position_decoder(H, R, z)
+
+                top_position_probs, top_positions = torch.topk(P, beam_size, dim=-1)
+
+                for prob_position, p in zip(top_probs, top_tokens):
+                    new_R = insert_relative_position_to_matrix(p, R)
+                    new_score = new_score + prob_position
+                    all_candidates.append((new_seq, new_R, new_score))
+
+        beams = all_candidates[:beam_size]
+
+    def normalize_score(seq, score):
+        length = seq.shape[-1]
+        return score / length
+
+    # Choose best sequence
+    final_candidates = completed if len(completed) > 0 else beams
+    best_seq, best_R, best_score = max(
+        final_candidates,
+        key=lambda x: normalize_score(x[0], x[1])
+    )
+
+    best_seq = restore_permutation(best_seq, best_R)
+
+    return best_seq
 
     # TODO
 
