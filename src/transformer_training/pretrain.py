@@ -40,6 +40,8 @@ def compute_validation_loss(args, model, valid_dataloader, global_step, device):
             step=global_step,
         )
 
+    return val_loss.item()
+
 def train(args, device, only_utr5=False):
     dataset = MRNACsvDataset(
         csv_path=args.csv_path,
@@ -112,24 +114,24 @@ def train(args, device, only_utr5=False):
         epoch_loss /= len(dataloader)
         print(f"Epoch {epoch} | loss={epoch_loss:.4f}")
 
-        if args.output_path and epoch_loss < best_loss:
-            best_loss = epoch_loss
-            torch.save({"model_state_dict": model.state_dict()}, args.output_path)
-        compute_validation_loss(args, model, valid_dataloader, global_step, device)
+        valid_loss = compute_validation_loss(args, model, valid_dataloader, global_step, device)
 
+        if args.output_path and valid_loss < best_loss:
+            best_loss = valid_loss 
+            torch.save({"model_state_dict": model.state_dict()}, args.output_path)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--csv_path", type=str, default="../../data/pretraining/pretraining_refseq.csv")
-    parser.add_argument("--n_layers", type=int, default=4)
+    parser.add_argument("--n_layers", type=int, default=6)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--max_utr5_len", type=int, default=200)
     parser.add_argument("--max_cds_len", type=int, default=500)
     parser.add_argument("--max_utr3_len", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--epochs", type=int, default=22)
     parser.add_argument("--output_path", type=str, default=None)
     parser.add_argument("--wandb", action="store_true")
     args = parser.parse_args()
@@ -140,12 +142,12 @@ def main():
 
     if args.wandb:
         wandb.init(
-            project="transformer-parameter-grid",
+            project="transformer-pretraining",
             config=vars(args),
             dir='../../logs',
         )
 
-    only_utr5 = False
+    only_utr5 = True 
     train(args, device, only_utr5)
 
     if args.wandb:
