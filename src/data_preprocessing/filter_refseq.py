@@ -2,6 +2,10 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import csv
 import gzip
 import os
+<<<<<<< HEAD
+import random
+=======
+>>>>>>> main
 from Bio import SeqIO
 from tqdm import tqdm
 import pandas as pd
@@ -21,7 +25,11 @@ MIN_UTR3_LEN = 0
 
 MAX_UTR5_LEN = 200
 MAX_CDS_LEN = 500
+<<<<<<< HEAD
+MAX_UTR3_LEN = 300
+=======
 MAX_UTR3_LEN = 0
+>>>>>>> main
 
 TRUNCATE_UTR5 = False
 TRUNCATE_CDS = False
@@ -33,6 +41,11 @@ CSV_CHUNK_SIZE = int(1e8) # save CSV chunk after this many records
 
 CHECK_METADATA_DUPLICATES = False
 
+<<<<<<< HEAD
+TEST_SPLIT_RATIO = 0.2
+
+=======
+>>>>>>> main
 
 def get_file_paths(dataset_dir: str) -> list[str]:
     """Get all file paths in the dataset directory."""
@@ -93,6 +106,10 @@ def _process_file(file_path: str, metadata_df: pd.DataFrame) -> list[dict]:
                 "utr5": str(utr5),
                 "cds": str(cds_seq),
                 "utr3": str(utr3),
+<<<<<<< HEAD
+                "split": metadata["split"],
+=======
+>>>>>>> main
             })
 
     return records
@@ -107,6 +124,21 @@ def process_file(file_path: str, metadata_df: pd.DataFrame) -> list[dict]:
         return []  # Return empty list for corrupt files
 
 
+<<<<<<< HEAD
+def save_records(records: list[dict], output_dir: str, part_id: int) -> None:
+    """Save extracted records to a CSV file."""
+    train_output_path = os.path.join(output_dir, f"pretraining_data_train_part{part_id}.csv")
+    test_output_path = os.path.join(output_dir, f"pretraining_data_test_part{part_id}.csv")
+
+    train_df = pd.DataFrame([r for r in records if r["split"] == "train"])
+    test_df = pd.DataFrame([r for r in records if r["split"] == "test"])
+
+    train_df[CSV_COLUMNS].to_csv(train_output_path, index=False)
+    print(f"Saved {len(train_df)} records to {train_output_path}")
+
+    test_df[CSV_COLUMNS].to_csv(test_output_path, index=False)
+    print(f"Saved {len(test_df)} records to {test_output_path}")
+=======
 def save_records(records: list[dict], output_path: str) -> None:
     """Save extracted records to a CSV file."""
     with open(output_path, "w", newline="") as f:
@@ -114,6 +146,7 @@ def save_records(records: list[dict], output_path: str) -> None:
         writer.writeheader()
         writer.writerows(records)
     print(f"Saved {len(records)} records to {output_path}")
+>>>>>>> main
 
 
 if __name__ == "__main__":
@@ -134,6 +167,19 @@ if __name__ == "__main__":
         metadata_df = pd.read_csv(metadata_path)
         metadata_df.set_index("id", inplace=True)
 
+<<<<<<< HEAD
+        # Get genes for train/test split
+        # We make sure that we won't have the same CDS in both splits
+        all_genes = list(metadata_df["gene"].unique())
+        random.shuffle(all_genes)
+        split_idx = int(len(all_genes) * (1 - TEST_SPLIT_RATIO))
+        train_genes = set(all_genes[:split_idx])
+        test_genes = set(all_genes[split_idx:])
+
+        metadata_df["split"] = metadata_df["gene"].apply(lambda g: "train" if g in train_genes else "test")
+
+=======
+>>>>>>> main
         for file_path in tqdm(dataset_file_paths, desc=f"Processing files in {dataset}"):
             records = process_file(file_path, metadata_df)
             print(f"  Extracted {len(records)} valid transcripts from {file_path}")
@@ -146,15 +192,23 @@ if __name__ == "__main__":
                 print(f"  No valid records extracted from {file_path}. Marking as potentially corrupt.")
 
             if len(all_records) >= CSV_CHUNK_SIZE:
+<<<<<<< HEAD
+                save_records(all_records, CSV_OUTPUT_DIR, part_id)
+=======
                 output_path = os.path.join(CSV_OUTPUT_DIR, f"pretraining_data_part{part_id}.csv")
                 save_records(all_records, output_path)
 
+>>>>>>> main
                 all_records = []
                 part_id += 1
 
     if all_records:
+<<<<<<< HEAD
+        save_records(all_records, CSV_OUTPUT_DIR, part_id)
+=======
         output_path = os.path.join(CSV_OUTPUT_DIR, f"pretraining_data_part{part_id}.csv")
         save_records(all_records, output_path)
+>>>>>>> main
 
     if corrupt_files:
         print("\nThe following files were potentially corrupt (no valid records extracted):")

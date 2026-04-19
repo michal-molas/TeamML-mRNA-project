@@ -7,3 +7,5 @@ data/refseq filter=lfs diff=lfs merge=lfs -text
 data/pretraining/pretraining_refseq.csv filter=lfs diff=lfs merge=lfs -text
 data/refseq/vertebrate_mammalian/metadata.csv filter=lfs diff=lfs merge=lfs -text
 data/refseq/vertebrate_other/metadata.csv filter=lfs diff=lfs merge=lfs -text
+data/pretraining/dataset_with_utr3/test.csv filter=lfs diff=lfs merge=lfs -text
+data/pretraining/dataset_with_utr3/train.csv filter=lfs diff=lfs merge=lfs -text
