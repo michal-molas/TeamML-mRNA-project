@@ -56,9 +56,6 @@ class MRNACsvDataset(Dataset):
 
         print("Loading dataset...")
         for i, row in tqdm(self.df.iterrows(), total=len(self.df)):
-            if i > 10000:
-                break
-
             # 5'UTR generation should be right-to-left, hence the reverse
             # UTRs are trimmed to max length, mrna is skipped if CDS is too long
             utr5_str = str(row["utr5"])[::-1][:self.max_utr5_len].upper()
