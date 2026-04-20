@@ -75,7 +75,7 @@ def main():
 
     job_id = is_job_running(job_id)
 
-    time.sleep(20)
+    time.sleep(40)
 
     tail_exec(job_id)
 
