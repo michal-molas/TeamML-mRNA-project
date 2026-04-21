@@ -45,12 +45,14 @@ class IndigoAttentionLayer(nn.Module):
         r += 1 # {-1, 0, 1} to valid indices {0, 1, 2}
         R = self.relative_positional_embedding.weight[r] # shape: (batch, seq_len, seq_len, dmodel)
 
-        S = torch.einsum('bhik,bhjk,ijk->bhij', query, key, R)
+        q_dot_k = torch.matmul(query, key.transpose(-2, -1))
+        q_dot_r = torch.einsum('bhid,bijd->bhij', query, R)
+        S = q_dot_k + q_dot_r
         # instead of S[i, j] = Q[i] * K[j] in ordinary attention, we introduce relative position bias
         # S[i, j] = Q[i] * (K[j] + R[i, j])
         assert S.shape == (batch, self.heads, seq_len, seq_len)
 
-        attention_weights = torch.softmax(((1 / torch.sqrt(self.dmodel)) * S), dim=-1)
+        attention_weights = torch.softmax(((1 / (self.dmodel ** 0.5)) * S), dim=-1)
         attention_output = torch.matmul(attention_weights, value)
         # I don't yet know, how to use attention backend for this
 
@@ -114,7 +116,7 @@ class IndigoWordDecodingHead(nn.Module):
         assert embedding_matrix.shape[:-2] == (self.vocab_size, self.dmodel)
         assert R.shape[:-2] == (self.seq_len, self.seq_len) # relative position matrix
 
-        output = torch.softmax(torch.matmul(self.proj(H[..., -1, :]), embedding_matrix.T))
+        output = torch.softmax(torch.matmul(self.proj(H[..., -1, :]), embedding_matrix.T), dim=-1)
 
         return output, R
 
@@ -141,9 +143,9 @@ class IndigoPositionDecodingHead(nn.Module):
         left_positions = self.left_proj(H)
         right_positions = self.right_proj(H)
 
-        output = torch.matmul((self.state_proj(H[..., -1, :]) + self.embedding_matrix[z]), 
-                              torch.cat([left_positions, right_positions], dim=-2).T)
-        output = torch.softmax(output)
+        query = (self.state_proj(H[..., -1, :]) + embedding_matrix[z]).unsqueeze(-2)
+        keys = torch.cat([left_positions, right_positions], dim=-2).transpose(-1, -2)
+        output = torch.softmax(torch.matmul(query, keys).squeeze(-2), dim=-1)
 
         return output, R 
 
@@ -156,24 +158,28 @@ def insert_relative_position_to_matrix(p, R):
     n = R.shape[-1] # length of the previously generated sequence
     neighbour_token = p % n 
 
-    r = R[neighbour_token]
-    if p < n:
-        r[neighbour_token] = 1
-    else:
-        r[neighbour_token] = -1
+    new_col = R[..., neighbour_token].clone()
+    new_col[..., neighbour_token] = 1 if p < n else -1
 
-    return torch.cat([torch.cat([R, r.view(n, 1)], dim=-1), 
-               torch.cat([(-r).view(1, n), torch.zeros(1,1)], dim=-1)], dim=-2)
+    R_expanded = torch.cat([R, new_col.unsqueeze(-1)], dim=-1)
+
+    new_row = -new_col.transpose(-1, -2)
+    zero_pad = torch.zeros_like(new_row[..., :1])
+    new_row = torch.cat([new_row, zero_pad], dim=-1)
+    
+    return torch.cat([R_expanded, new_row], dim=-2)
 
 
 def restore_permutation(x, R):
 
     # permutes the sequence according to the relative position matrix
 
-    R = R.copy()
-    R[R == -1] = 0
-    positions = torch.sum(R, dim=-1)
-    return x[positions]
+    R_clamped = torch.clamp(R, min=0)
+    positions = torch.sum(R_clamped, dim=-1).long()
+    sorted_indices = torch.argsort(positions, dim=-1)
+    
+    batch_idx = torch.arange(x.shape[0], device=x.device).unsqueeze(1)
+    return x[batch_idx, sorted_indices]
 
 
 
@@ -232,7 +238,7 @@ def generate_beam_search(model, input_ids, beam_size, max_len):
 
                 top_position_probs, top_positions = torch.topk(P, beam_size, dim=-1)
 
-                for prob_position, p in zip(top_probs, top_tokens):
+                for prob_position, p in zip(top_position_probs, top_positions):
                     new_R = insert_relative_position_to_matrix(p, R)
                     new_score = new_score + prob_position
                     all_candidates.append((new_seq, new_R, new_score))
