@@ -1,8 +1,11 @@
 import argparse
 import sys
 from pathlib import Path
-import torch
 from dotenv import load_dotenv
+
+import numpy as np
+import pandas as pd
+import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 from torch.optim import AdamW
@@ -143,6 +146,7 @@ def load_pretrained_weights(model, checkpoint_path, device):
 
 
 def train(args, device):
+
     dataset = MRNACsvDataset(
         csv_path=args.csv_path,
         max_utr5_len=args.max_utr5_len,
@@ -176,7 +180,8 @@ def train(args, device):
 
     load_pretrained_weights(model, args.pretrained_path, device)
 
-    ribonn_model, ribonn_max_len = load_ribonn(args.ribonn_weights, device)
+    # ribonn_model, ribonn_max_len = load_ribonn(args.ribonn_weights, device)
+    _, ribonn_max_len = load_ribonn(args.ribonn_weights, device)
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
 
@@ -184,7 +189,7 @@ def train(args, device):
     best_val_lm = float("inf")
     for epoch in range(args.epochs):
         model.train()
-        for step, batch in tqdm(list(enumerate(train_loader))):
+        for step, batch in tqdm(enumerate(train_loader), total=len(train_loader)):
             batch = {k: v.to(device) for k, v in batch.items()}
             input_ids = batch["input_ids"]
             target_ids = batch["target_ids"]
@@ -217,7 +222,58 @@ def train(args, device):
                 ribonn_max_len,
                 label_codons=RIBONN_CONFIG["label_codons"],
             )
-            te_pred = ribonn_model(ribonn_input)
+
+            ## RiboNN.src.predict.predict_using_nested_cross_validation_models() ##
+            run_df = pd.read_csv(args.ribonn_weights_folder + '/runs.csv') 
+            all_prediction_dfs = []
+            for test_fold in np.sort(run_df["params.test_fold"].unique()):
+                test_fold_str = str(test_fold)
+                sub_run_df = run_df.query(
+                    "`params.test_fold` == @test_fold_str or `params.test_fold` == @test_fold"
+                ).reset_index(drop=True)
+
+                # prediction_df = predict_using_models_trained_in_one_fold(
+                #     sub_run_df, config, dm, top_k_models_to_use
+                # )
+
+                ## RiboNN.src.predict.predict_using_models_trained_in_one_fold() ##
+                top_k_models_to_use = 1
+                training_data_columns = "TE_108T,TE_12T,TE_A2780,TE_A549,TE_BJ,TE_BRx.142,TE_C643,TE_CRL.1634,TE_Calu.3,TE_Cybrid_Cells,TE_H1.hESC,TE_H1933,TE_H9.hESC,TE_HAP.1,TE_HCC_tumor,TE_HCC_adjancent_normal,TE_HCT116,TE_HEK293,TE_HEK293T,TE_HMECs,TE_HSB2,TE_HSPCs,TE_HeLa,TE_HeLa_S3,TE_HepG2,TE_Huh.7.5,TE_Huh7,TE_K562,TE_Kidney_normal_tissue,TE_LCL,TE_LuCaP.PDX,TE_MCF10A,TE_MCF10A.ER.Src,TE_MCF7,TE_MD55A3,TE_MDA.MB.231,TE_MM1.S,TE_MOLM.13,TE_Molt.3,TE_Mutu,TE_OSCC,TE_PANC1,TE_PATU.8902,TE_PC3,TE_PC9,TE_Primary_CD4._T.cells,TE_Primary_human_bronchial_epithelial_cells,TE_RD.CCL.136,TE_RPE.1,TE_SH.SY5Y,TE_SUM159PT,TE_SW480TetOnAPC,TE_T47D,TE_THP.1,TE_U.251,TE_U.343,TE_U2392,TE_U2OS,TE_Vero_6,TE_WI38,TE_WM902B,TE_WTC.11,TE_ZR75.1,TE_cardiac_fibroblasts,TE_ccRCC,TE_early_neurons,TE_fibroblast,TE_hESC,TE_human_brain_tumor,TE_iPSC.differentiated_dopamine_neurons,TE_megakaryocytes,TE_muscle_tissue,TE_neuronal_precursor_cells,TE_neurons,TE_normal_brain_tissue,TE_normal_prostate,TE_primary_macrophages,TE_skeletal_muscle"
+                predicted_columns = training_data_columns.replace("TE_", "predicted_TE_").split(",")
+
+                sub_run_df = sub_run_df.sort_values("metrics.val_r2", ascending=False).head(top_k_models_to_use)
+
+                predictions = []
+                # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+                for run_id in sub_run_df.run_id:
+                    # Create a new model
+                    local_state_dict_path = f"{args.ribonn_weights_folder}/{run_id}/state_dict.pth"
+                    ribonn_model, _ = load_ribonn(local_state_dict_path, device)
+                    ribonn_model.to(device)
+                    ribonn_model.eval()
+                    predictions.append(ribonn_model(ribonn_input))
+
+                mean_prediction = torch.stack(predictions, axis=-1).mean(axis=-1)
+                print(mean_prediction.shape, file=sys.stderr)
+
+                fold_df = pd.DataFrame(mean_prediction.detach().numpy(), columns=predicted_columns)
+                print(fold_df, file=sys.stderr)
+                print(fold_df.shape, file=sys.stderr)
+
+                sys.exit(0)
+
+                # df = pd.concat([dm.df, df], axis=1)
+                # return df
+                ##
+
+                fold_df["fold"] = int(test_fold)
+                all_prediction_dfs.append(fold_df)
+
+            all_predictions = pd.concat(all_prediction_dfs, axis=0, ignore_index=True)
+            ##
+
+            # te_pred = ribonn_model(ribonn_input)
+
             # TODO: How to compare the TE to the label? 
             #       Can our model output results better than the data (then maybe relu)?
             #       Maybe we should just try to maximize the TE and ignore the label?
@@ -313,6 +369,12 @@ def main():
         help="Path to a RiboNN state_dict.pth weight file",
     )
     parser.add_argument(
+        "--ribonn_weights_folder",
+        type=str,
+        default=None,
+        help="Path to a RiboNN state_dict.pth weight file",
+    )
+    parser.add_argument(
         "--lambda_ribonn",
         type=float,
         default=1.0,
@@ -325,7 +387,7 @@ def main():
     parser.add_argument("--max_utr5_len", type=int, default=200)
     parser.add_argument("--max_cds_len", type=int, default=500)
     parser.add_argument("--max_utr3_len", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=128)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
@@ -347,7 +409,6 @@ def main():
 
     if args.wandb:
         wandb.finish()
-
 
 if __name__ == "__main__":
     main()

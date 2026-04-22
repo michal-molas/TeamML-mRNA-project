@@ -14,7 +14,13 @@ class MRNACsvDataset(Dataset):
         max_utr3_len=2048,
         only_utr5=False,
     ):
-        self.df = pd.read_csv(csv_path)
+        dataframe = None
+        if (csv_path.split('.')[-1] == 'xlsx'):
+            dataframe = pd.read_excel(csv_path)
+        else:
+            dataframe = pd.read_csv(csv_path)
+
+        self.df = dataframe
         self.max_utr5_len = max_utr5_len
         self.max_cds_len = max_cds_len
         self.max_utr3_len = max_utr3_len
