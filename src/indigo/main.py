@@ -62,7 +62,8 @@ class IndigoAttentionLayer(nn.Module):
         self.input_projection = nn.Linear(dmodel, 3 * dmodel, bias=False)
         self.output_projection = nn.Linear(dmodel, dmodel, bias=False)
 
-        self.relative_positional_embedding = nn.Linear(3, dmodel, bias=False) 
+        d_head = dmodel // heads
+        self.relative_positional_embedding = nn.Embedding(3, d_head)
         # learnable embeddings for relative position from {-1, 0, 1}
 
     def forward(self, x, r, attention_mask):
@@ -82,8 +83,7 @@ class IndigoAttentionLayer(nn.Module):
         key = k_chunk.view(batch, seq_len, self.heads, -1).transpose(1, 2)
         value = v_chunk.view(batch, seq_len, self.heads, -1).transpose(1, 2)
 
-        r += 1 # {-1, 0, 1} to valid indices {0, 1, 2}
-        R = self.relative_positional_embedding.weight[r] # shape: (batch, seq_len, seq_len, dmodel)
+        R = self.relative_positional_embedding(r + 1)  # (batch, seq_len, seq_len, d_head), no in-place mutation
 
         q_dot_k = torch.matmul(query, key.transpose(-2, -1))
         q_dot_r = torch.einsum('bhid,bijd->bhij', query, R)

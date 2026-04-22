@@ -95,6 +95,8 @@ def build_training_tensors(prefix_tokens, target_tokens, eos_id):
       - prefix_len: int
       - target_len: int
     """
+
+    # This is the Pre-defined Order (RND)
     target_len = len(target_tokens)
     perm = list(range(target_len))
     random.shuffle(perm)
