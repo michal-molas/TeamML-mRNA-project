@@ -50,6 +50,14 @@ def tail_exec(job_id):
     os.execvp(cmd[0], cmd)
 
 def run_command(cmd: list[str]) -> int:
+    debug = False
+
+    if cmd[0] in ['--debug', '-d']:
+        debug = True
+        cmd = cmd[1:]
+
+    
+
     proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -68,7 +76,7 @@ def run_command(cmd: list[str]) -> int:
 def main():
     cmd = sys.argv[1:]
     if not cmd:
-        print("usage: wrap.py <cmd> [args...]")
+        print("usage: wrap.py [--debug | -d] <cmd> [args...]")
         sys.exit(1)
 
     job_id = run_sbatch(cmd)

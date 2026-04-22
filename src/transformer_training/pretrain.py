@@ -132,6 +132,7 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=3e-4)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--output_path", type=str, default=None)
+    parser.add_argument("--input_path", type=str, default=None)
     parser.add_argument("--wandb", action="store_true")
     args = parser.parse_args()
 

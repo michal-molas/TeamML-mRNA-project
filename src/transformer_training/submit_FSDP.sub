@@ -32,4 +32,4 @@ time torchrun \
   --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
   pretrain_FSDP.py \
   --wandb \
-  --output_path model_state_dict/utr53_pretrained_fsdb.pt
+  --output_path model_state_dict/utr53_pretrained_fsdp.pt
