@@ -1,6 +1,6 @@
 import argparse
-import sys
 import random
+import sys
 
 import wandb
 import torch
@@ -300,9 +300,6 @@ def compute_indigo_loss_batched(model, batch, device):
         # Apply mask in one call (no in-place on logits for clean autograd).
         logits_full = logits_full.masked_fill(full_mask, float('-inf'))
 
-        # Detect rows where every logit is -inf (would produce NaN in cross_entropy).
-        all_neginf = (~full_mask).sum(dim=2) == 0  # True if no valid column (B, T)
-
         # Remap pos_targets from step-local range [0, 2*n_gen) to full column space [0, 2T).
         # n_gen at step t = t+1; left targets stay as-is, right targets shift by T - n_gen.
         n_gen_vals = torch.arange(1, T + 1, device=device).unsqueeze(0)  # (1, T)
@@ -318,22 +315,44 @@ def compute_indigo_loss_batched(model, batch, device):
             torch.arange(T, device=device).unsqueeze(0) < (target_lens - 1).unsqueeze(1)
         )  # (B, T)
         tgt_in_range = pos_targets_pad < 2 * n_gen_vals  # (B, T)
-        valid_mask_pos = valid_step & tgt_in_range & ~all_neginf  # (B, T)
+
+        # Avoid rows where all logits would be -inf (causes NaN in cross_entropy).
+        all_neginf = (~full_mask).sum(dim=2) == 0  # (B, T)
+        # Also exclude targets pointing to BOS (col 0) or masked EOS columns
+        bos_mask = target_col_full == 0  # BOS column always masked
+        eos_mask = torch.zeros_like(target_col_full, dtype=torch.bool)
+        if eos_valid_b.any():
+            # EOS column is T + eos_gen_idx for each sample
+            eos_cols = (T + eos_gen_idxs).clamp(0, 2 * T - 1)  # (B,)
+            for b in range(B):
+                if eos_valid_b[b]:
+                    eos_mask[b] = target_col_full[b] == eos_cols[b]
+        valid_mask_pos = valid_step & tgt_in_range & ~all_neginf & ~bos_mask & ~eos_mask  # (B, T)
 
         if valid_mask_pos.any():
-            # Clamp logits to avoid NaN from all-(-inf) rows in cross_entropy.
-            # Values outside [-1e4, 1e4] are clamped; -inf becomes -1e4 (very small but finite).
-            logits_clamped = logits_full.clamp(-1e4, 1e4)
-            loss_all = F.cross_entropy(
-                logits_clamped.reshape(B * T, 2 * T),
-                target_col_full.reshape(B * T),
-                reduction='none',
-            ).reshape(B, T)
-            pos_loss = (loss_all * valid_mask_pos.float()).sum()
-            n_pos_valid = int(valid_mask_pos.sum())
+            # Filter to valid positions only to avoid NaN from all-(-inf) rows.
+            flat_logits = logits_full.reshape(B * T, 2 * T)[valid_mask_pos.reshape(B * T)]
+            flat_targets = target_col_full.reshape(B * T)[valid_mask_pos.reshape(B * T)]
+            pos_loss = F.cross_entropy(flat_logits, flat_targets)
 
-    if n_pos_valid > 0:
-        pos_loss = pos_loss / n_pos_valid
+    # Debug inf values
+    if not torch.isfinite(word_loss).all():
+        print(f"DEBUG: word_loss has inf/nan: {word_loss}", file=sys.stderr)
+        print(f"DEBUG: word_logits finite: {torch.isfinite(word_logits).all()}", file=sys.stderr)
+    if not torch.isfinite(pos_loss).all():
+        n_valid = valid_mask_pos.sum().item() if max_pos_steps > 0 else 0
+        print(f"DEBUG: pos_loss has inf/nan: {pos_loss}, n_valid: {n_valid}", file=sys.stderr)
+        if max_pos_steps > 0 and n_valid > 0:
+            # Check if targets point to -inf logits
+            flat_logits = logits_full.reshape(B * T, 2 * T)
+            flat_targets = target_col_full.reshape(B * T)
+            valid_flat = valid_mask_pos.reshape(B * T)
+            valid_logits = flat_logits[valid_flat]
+            valid_targets = flat_targets[valid_flat]
+            # Gather logits at target positions
+            target_logits = valid_logits[torch.arange(valid_targets.size(0)), valid_targets]
+            n_inf_targets = (target_logits == float('-inf')).sum().item()
+            print(f"DEBUG: {n_inf_targets}/{valid_targets.size(0)} targets point to -inf", file=sys.stderr)
 
     return word_loss + pos_loss
 
