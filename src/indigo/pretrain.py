@@ -1,4 +1,5 @@
 import argparse
+import bisect
 import random
 import sys
 
@@ -43,43 +44,23 @@ def build_full_R_matrix(prefix_len, target_len, perm):
 
 
 def compute_position_targets(perm):
-    """Compute INDIGO position targets for the generation permutation (optimized).
-
-    Returns list of p_indigo values (length target_len - 1).
-    At step i (i >= 1), p_indigo encodes where token i is inserted among
-    the already-placed tokens 0..i-1.
-    """
-    import bisect
-
+    """Compute INDIGO position targets for the generation permutation."""
     position_targets = []
-    # Maintain placed as sorted list for O(log n) insertion and search
     sorted_placed = [perm[0]]
-    # Map from absolute position to generation index
     gen_idx_map = {perm[0]: 0}
 
     for i in range(1, len(perm)):
         cur_pos = perm[i]
-        # Binary search for insertion position
         insert_idx = bisect.bisect_left(sorted_placed, cur_pos)
 
         if insert_idx == 0:
-            # Insert at leftmost position
-            neighbour_abs = sorted_placed[0]
-            neighbour_gen_idx = gen_idx_map[neighbour_abs]
-            p_indigo = neighbour_gen_idx
+            p_indigo = gen_idx_map[sorted_placed[0]]
         elif insert_idx == len(sorted_placed):
-            # Insert at rightmost position
-            neighbour_abs = sorted_placed[-1]
-            neighbour_gen_idx = gen_idx_map[neighbour_abs]
-            p_indigo = i + neighbour_gen_idx
+            p_indigo = i + gen_idx_map[sorted_placed[-1]]
         else:
-            # Insert in middle - use left neighbor
-            left_neighbour_abs = sorted_placed[insert_idx - 1]
-            neighbour_gen_idx = gen_idx_map[left_neighbour_abs]
-            p_indigo = i + neighbour_gen_idx
+            p_indigo = i + gen_idx_map[sorted_placed[insert_idx - 1]]
 
         position_targets.append(p_indigo)
-        # Insert maintaining sorted order
         sorted_placed.insert(insert_idx, cur_pos)
         gen_idx_map[cur_pos] = i
 
@@ -241,50 +222,38 @@ def compute_indigo_loss_batched(model, batch, device):
 
     # --- Position loss (vectorized over all steps) ---
     pos_loss = torch.tensor(0.0, device=device)
-    n_pos_valid = 0
 
     if max_pos_steps > 0:
         W = model.get_embedding_matrix()
         T = max_pos_steps
 
-        # Gather ALL generated-token hidden states in one call.
-        # gen_all_pos[b, t] = position of the (t+1)-th generated token for sample b.
-        gen_all_pos = (
-            prefix_lens.unsqueeze(1) + torch.arange(T, device=device).unsqueeze(0)
-        ).clamp(0, max_seq_len - 1)  # (B, T)
-        H_gen_all = H.gather(
-            1, gen_all_pos.unsqueeze(-1).expand(-1, -1, d_model)
-        )  # (B, T, d_model)
+        # Gather hidden states for all generated positions
+        gen_all_pos = (prefix_lens.unsqueeze(1) + torch.arange(T, device=device)).clamp(0, max_seq_len - 1)
+        H_gen_all = H.gather(1, gen_all_pos.unsqueeze(-1).expand(-1, -1, d_model))
 
-        # Run all three projections once on the full (B, T, d_model) tensor.
-        H_left_all  = model.position_head_left_proj(H_gen_all)   # (B, T, d_model)
-        H_right_all = model.position_head_right_proj(H_gen_all)  # (B, T, d_model)
-        H_state_all = model.position_head_state_proj(H_gen_all)  # (B, T, d_model)
+        # Projections for position prediction
+        H_left_all = model.position_head_left_proj(H_gen_all)
+        H_right_all = model.position_head_right_proj(H_gen_all)
+        H_state_all = model.position_head_state_proj(H_gen_all)
 
-        # z_emb[b, t] = embedding of the token inserted at step t (= word_targets[:, t+1])
-        z_emb_all = W[word_targets[:, 1 : T + 1].clamp(0, vocab_size - 1)]  # (B, T, d_model)
+        # Query = state_proj(h) + embedding of token to insert
+        z_emb_all = W[word_targets[:, 1 : T + 1].clamp(0, vocab_size - 1)]
+        query_all = H_state_all + z_emb_all
 
-        # query[b, t] = state_proj(last_generated_at_t) + z_emb[t]
-        query_all = H_state_all + z_emb_all  # (B, T, d_model)
-
-        # keys[b, :, :] = [left_all | right_all], shape (B, 2T, d_model)
+        # Keys = [left_keys | right_keys], compute full logit matrix
         keys_full = torch.cat([H_left_all, H_right_all], dim=1)
-
-        # Full logit matrix via single bmm: (B, T, 2T)
         logits_full = torch.bmm(query_all, keys_full.transpose(-1, -2))
 
-        # Build full mask (True = mask to -inf).
-        # Causal: at step t, only columns [0..t] (left) and [T..T+t] (right) are valid.
-        t_idx = torch.arange(T, device=device).unsqueeze(1)      # (T, 1)
-        j_idx = torch.arange(2 * T, device=device).unsqueeze(0)  # (1, 2T)
-        left_valid  = (j_idx < T)  & (j_idx <= t_idx)
+        # Causal mask: at step t, only columns [0..t] (left) and [T..T+t] (right) are valid.
+        t_idx = torch.arange(T, device=device).unsqueeze(1)
+        j_idx = torch.arange(2 * T, device=device).unsqueeze(0)
+        left_valid = (j_idx < T) & (j_idx <= t_idx)
         right_valid = (j_idx >= T) & (j_idx <= T + t_idx)
-        full_mask = (~(left_valid | right_valid)).unsqueeze(0).expand(B, -1, -1).clone()  # (B, T, 2T)
+        full_mask = (~(left_valid | right_valid)).unsqueeze(0).expand(B, -1, -1).clone()
 
-        # BOS mask: column 0 (left-of-first-token) always invalid.
-        full_mask[:, :, 0] = True
+        full_mask[:, :, 0] = True  # BOS column always invalid
 
-        # EOS mask: for sample b, mask column T+eos_gen_idx[b] at steps t >= eos_gen_idx[b].
+        # EOS mask: mask column T+eos_gen_idx at steps t >= eos_gen_idx
         eos_valid_b = eos_gen_idxs >= 0  # (B,)
         if eos_valid_b.any():
             eos_col = (T + eos_gen_idxs).clamp(0, 2 * T - 1)  # (B,)
@@ -297,62 +266,32 @@ def compute_indigo_loss_batched(model, batch, device):
             eos_scatter.scatter_(2, eos_col_3d, eos_active_bt.unsqueeze(2))
             full_mask = full_mask | eos_scatter
 
-        # Apply mask in one call (no in-place on logits for clean autograd).
         logits_full = logits_full.masked_fill(full_mask, float('-inf'))
 
-        # Remap pos_targets from step-local range [0, 2*n_gen) to full column space [0, 2T).
-        # n_gen at step t = t+1; left targets stay as-is, right targets shift by T - n_gen.
-        n_gen_vals = torch.arange(1, T + 1, device=device).unsqueeze(0)  # (1, T)
-        is_right_tgt = pos_targets_pad >= n_gen_vals                       # (B, T)
+        # Remap targets from step-local range [0, 2*n_gen) to full column space [0, 2T)
+        n_gen_vals = torch.arange(1, T + 1, device=device).unsqueeze(0)
+        is_right_tgt = pos_targets_pad >= n_gen_vals
         target_col_full = torch.where(
-            is_right_tgt,
-            T + pos_targets_pad - n_gen_vals,
-            pos_targets_pad,
-        ).clamp(0, 2 * T - 1)  # (B, T)
+            is_right_tgt, T + pos_targets_pad - n_gen_vals, pos_targets_pad
+        ).clamp(0, 2 * T - 1)
 
-        # Validity: step t is valid for sample b if b has a position target at t.
-        valid_step = (
-            torch.arange(T, device=device).unsqueeze(0) < (target_lens - 1).unsqueeze(1)
-        )  # (B, T)
-        tgt_in_range = pos_targets_pad < 2 * n_gen_vals  # (B, T)
-
-        # Avoid rows where all logits would be -inf (causes NaN in cross_entropy).
-        all_neginf = (~full_mask).sum(dim=2) == 0  # (B, T)
-        # Also exclude targets pointing to BOS (col 0) or masked EOS columns
-        bos_mask = target_col_full == 0  # BOS column always masked
+        # Build validity mask: valid steps AND targets in range AND not pointing to masked columns
+        valid_step = torch.arange(T, device=device).unsqueeze(0) < (target_lens - 1).unsqueeze(1)
+        tgt_in_range = pos_targets_pad < 2 * n_gen_vals
+        all_neginf = (~full_mask).sum(dim=2) == 0
+        bos_mask = target_col_full == 0
         eos_mask = torch.zeros_like(target_col_full, dtype=torch.bool)
         if eos_valid_b.any():
-            # EOS column is T + eos_gen_idx for each sample
-            eos_cols = (T + eos_gen_idxs).clamp(0, 2 * T - 1)  # (B,)
+            eos_cols = (T + eos_gen_idxs).clamp(0, 2 * T - 1)
             for b in range(B):
                 if eos_valid_b[b]:
                     eos_mask[b] = target_col_full[b] == eos_cols[b]
-        valid_mask_pos = valid_step & tgt_in_range & ~all_neginf & ~bos_mask & ~eos_mask  # (B, T)
+        valid_mask_pos = valid_step & tgt_in_range & ~all_neginf & ~bos_mask & ~eos_mask
 
         if valid_mask_pos.any():
-            # Filter to valid positions only to avoid NaN from all-(-inf) rows.
             flat_logits = logits_full.reshape(B * T, 2 * T)[valid_mask_pos.reshape(B * T)]
             flat_targets = target_col_full.reshape(B * T)[valid_mask_pos.reshape(B * T)]
             pos_loss = F.cross_entropy(flat_logits, flat_targets)
-
-    # Debug inf values
-    if not torch.isfinite(word_loss).all():
-        print(f"DEBUG: word_loss has inf/nan: {word_loss}", file=sys.stderr)
-        print(f"DEBUG: word_logits finite: {torch.isfinite(word_logits).all()}", file=sys.stderr)
-    if not torch.isfinite(pos_loss).all():
-        n_valid = valid_mask_pos.sum().item() if max_pos_steps > 0 else 0
-        print(f"DEBUG: pos_loss has inf/nan: {pos_loss}, n_valid: {n_valid}", file=sys.stderr)
-        if max_pos_steps > 0 and n_valid > 0:
-            # Check if targets point to -inf logits
-            flat_logits = logits_full.reshape(B * T, 2 * T)
-            flat_targets = target_col_full.reshape(B * T)
-            valid_flat = valid_mask_pos.reshape(B * T)
-            valid_logits = flat_logits[valid_flat]
-            valid_targets = flat_targets[valid_flat]
-            # Gather logits at target positions
-            target_logits = valid_logits[torch.arange(valid_targets.size(0)), valid_targets]
-            n_inf_targets = (target_logits == float('-inf')).sum().item()
-            print(f"DEBUG: {n_inf_targets}/{valid_targets.size(0)} targets point to -inf", file=sys.stderr)
 
     return word_loss + pos_loss
 
