@@ -92,6 +92,10 @@ class IndigoAttentionLayer(nn.Module):
         # S[i, j] = Q[i] * (K[j] + R[i, j])
         assert S.shape == (batch, self.heads, seq_len, seq_len)
 
+        if attention_mask is not None:
+            # attention_mask: (batch, seq_len), True = padding (ignore)
+            S = S.masked_fill(attention_mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+
         attention_weights = torch.softmax(((1 / (self.dmodel ** 0.5)) * S), dim=-1)
         attention_output = torch.matmul(attention_weights, value)
         # I don't yet know, how to use attention backend for this

@@ -18,7 +18,7 @@ from main import IndigoTransformer
 
 
 def build_full_R_matrix(prefix_len, target_len, perm):
-    """Build relative position matrix R for the full input sequence.
+    """Build relative position matrix R for the full input sequence (vectorized).
 
     R[i, j] encodes relative position between token i and token j:
       -1: token i is LEFT of token j in the final sequence
@@ -32,53 +32,56 @@ def build_full_R_matrix(prefix_len, target_len, perm):
     """
     seq_len = prefix_len + target_len
     # Absolute position of each token in the input sequence
-    abs_pos = list(range(prefix_len))
-    for t in range(target_len):
-        abs_pos.append(prefix_len + perm[t])
+    abs_pos = torch.arange(seq_len, dtype=torch.long)
+    abs_pos[prefix_len:] = prefix_len + torch.tensor(perm, dtype=torch.long)
 
-    R = torch.zeros(seq_len, seq_len, dtype=torch.long)
-    for i in range(seq_len):
-        for j in range(seq_len):
-            if abs_pos[i] < abs_pos[j]:
-                R[i, j] = -1
-            elif abs_pos[i] > abs_pos[j]:
-                R[i, j] = 1
+    # Vectorized comparison: R[i,j] = sign(abs_pos[j] - abs_pos[i])
+    # -1 if abs_pos[i] < abs_pos[j], 0 if equal, 1 if greater
+    diff = abs_pos.unsqueeze(0) - abs_pos.unsqueeze(1)  # (seq_len, seq_len)
+    R = torch.sign(diff).long()  # -1, 0, or 1
     return R
 
 
 def compute_position_targets(perm):
-    """Compute INDIGO position targets for the generation permutation.
+    """Compute INDIGO position targets for the generation permutation (optimized).
 
     Returns list of p_indigo values (length target_len - 1).
     At step i (i >= 1), p_indigo encodes where token i is inserted among
     the already-placed tokens 0..i-1.
     """
+    import bisect
+
     position_targets = []
-    placed = [perm[0]]
+    # Maintain placed as sorted list for O(log n) insertion and search
+    sorted_placed = [perm[0]]
+    # Map from absolute position to generation index
+    gen_idx_map = {perm[0]: 0}
 
     for i in range(1, len(perm)):
         cur_pos = perm[i]
-        sorted_placed = sorted(placed)
-        insert_idx = 0
-        for j, p in enumerate(sorted_placed):
-            if p < cur_pos:
-                insert_idx = j + 1
+        # Binary search for insertion position
+        insert_idx = bisect.bisect_left(sorted_placed, cur_pos)
 
         if insert_idx == 0:
+            # Insert at leftmost position
             neighbour_abs = sorted_placed[0]
-            neighbour_gen_idx = placed.index(neighbour_abs)
+            neighbour_gen_idx = gen_idx_map[neighbour_abs]
             p_indigo = neighbour_gen_idx
         elif insert_idx == len(sorted_placed):
+            # Insert at rightmost position
             neighbour_abs = sorted_placed[-1]
-            neighbour_gen_idx = placed.index(neighbour_abs)
+            neighbour_gen_idx = gen_idx_map[neighbour_abs]
             p_indigo = i + neighbour_gen_idx
         else:
+            # Insert in middle - use left neighbor
             left_neighbour_abs = sorted_placed[insert_idx - 1]
-            neighbour_gen_idx = placed.index(left_neighbour_abs)
+            neighbour_gen_idx = gen_idx_map[left_neighbour_abs]
             p_indigo = i + neighbour_gen_idx
 
         position_targets.append(p_indigo)
-        placed.append(cur_pos)
+        # Insert maintaining sorted order
+        sorted_placed.insert(insert_idx, cur_pos)
+        gen_idx_map[cur_pos] = i
 
     return position_targets
 
@@ -97,6 +100,7 @@ def build_training_tensors(prefix_tokens, target_tokens, eos_id):
     """
 
     # This is the Pre-defined Order (RND)
+    # TODO: beam search
     target_len = len(target_tokens)
     perm = list(range(target_len))
     random.shuffle(perm)
@@ -129,49 +133,207 @@ def build_training_tensors(prefix_tokens, target_tokens, eos_id):
     }
 
 
-def compute_indigo_loss(model, input_ids, R, prefix_len, word_targets, pos_targets,
-                        target_len, eos_gen_idx, device):
-    """Compute combined word + position prediction loss for one INDIGO step.
+def collate_indigo_batch(samples, pad_id, eos_id):
+    """Collate a list of dataset samples into a padded batch for INDIGO training.
 
-    Uses teacher forcing: the encoder sees the full sequence with the final R
-    matrix, then word prediction loss is computed on all target positions
-    simultaneously. Position prediction loss is computed per-step.
+    Each sample is processed through extract_prefix_and_target + build_training_tensors,
+    then padded to the maximum lengths in the batch.
+
+    Returns a dict of batched tensors, or None if all samples were skipped.
     """
-    input_ids = input_ids.unsqueeze(0).to(device)  # (1, seq_len)
-    R = R.unsqueeze(0).to(device)                  # (1, seq_len, seq_len)
-    word_targets = word_targets.to(device)
-    pos_targets = pos_targets.to(device)
+    batch_tensors = []
+    for sample in samples:
+        prefix_tokens, target_tokens = extract_prefix_and_target(sample, pad_id)
+        if len(target_tokens) < 2:
+            continue
+        tensors = build_training_tensors(prefix_tokens, target_tokens, eos_id)
+        batch_tensors.append(tensors)
 
-    H, R_out, word_logits = model(input_ids, R)
+    if len(batch_tensors) == 0:
+        return None
 
-    # Word prediction loss: at input position (prefix_len - 1 + t), predict
-    # the t-th target token (autoregressive shift by 1)
-    target_logits = word_logits[0, prefix_len - 1: prefix_len - 1 + target_len, :]
-    word_loss = F.cross_entropy(target_logits, word_targets)
+    B = len(batch_tensors)
+    max_seq_len = max(t["input_ids"].size(0) for t in batch_tensors)
+    max_target_len = max(t["target_len"] for t in batch_tensors)
+    max_pos_steps = max(t["pos_targets"].size(0) for t in batch_tensors)
 
-    # Position prediction loss: for each step t in [1, target_len),
-    # predict where the (t+1)-th token is inserted among the first t tokens
+    input_ids = torch.full((B, max_seq_len), pad_id, dtype=torch.long)
+    R = torch.zeros(B, max_seq_len, max_seq_len, dtype=torch.long)
+    attention_mask = torch.ones(B, max_seq_len, dtype=torch.bool)  # True = padding
+    word_targets = torch.zeros(B, max_target_len, dtype=torch.long)
+    pos_targets = torch.zeros(B, max_pos_steps, dtype=torch.long)
+    prefix_lens = torch.zeros(B, dtype=torch.long)
+    target_lens = torch.zeros(B, dtype=torch.long)
+    eos_gen_idxs = torch.full((B,), -1, dtype=torch.long)
+
+    for i, t in enumerate(batch_tensors):
+        sl = t["input_ids"].size(0)
+        tl = t["target_len"]
+        pl = t["pos_targets"].size(0)
+
+        input_ids[i, :sl] = t["input_ids"]
+        R[i, :sl, :sl] = t["R"]
+        attention_mask[i, :sl] = False
+        word_targets[i, :tl] = t["word_targets"]
+        if pl > 0:
+            pos_targets[i, :pl] = t["pos_targets"]
+        prefix_lens[i] = t["prefix_len"]
+        target_lens[i] = t["target_len"]
+        if t["eos_gen_idx"] is not None:
+            eos_gen_idxs[i] = t["eos_gen_idx"]
+
+    return {
+        "input_ids": input_ids,
+        "R": R,
+        "attention_mask": attention_mask,
+        "word_targets": word_targets,
+        "pos_targets": pos_targets,
+        "prefix_lens": prefix_lens,
+        "target_lens": target_lens,
+        "eos_gen_idxs": eos_gen_idxs,
+    }
+
+
+def compute_indigo_loss_batched(model, batch, device):
+    """Compute combined word + position prediction loss for a batch.
+
+    Word loss: gathered from per-sample prefix offsets, masked by target length.
+    Position loss: iterated over generation steps, gathered from per-sample offsets,
+    with per-sample boundary masking.
+    """
+    input_ids = batch["input_ids"].to(device)
+    R = batch["R"].to(device)
+    attn_mask = batch["attention_mask"].to(device)
+    word_targets = batch["word_targets"].to(device)
+    pos_targets_pad = batch["pos_targets"].to(device)
+    prefix_lens = batch["prefix_lens"].to(device)
+    target_lens = batch["target_lens"].to(device)
+    eos_gen_idxs = batch["eos_gen_idxs"].to(device)
+
+    B = input_ids.size(0)
+    max_seq_len = input_ids.size(1)
+    max_target_len = word_targets.size(1)
+    max_pos_steps = pos_targets_pad.size(1)
+
+    # --- Forward pass ---
+    H, _, word_logits = model(input_ids, R, attn_mask)
+    vocab_size = word_logits.size(-1)
+    d_model = H.size(-1)
+
+    # --- Word loss ---
+    # For sample b, word predictions are at positions [prefix_lens[b]-1 .. prefix_lens[b]-1+target_lens[b]-1]
+    word_positions = (prefix_lens.unsqueeze(1) - 1
+                      + torch.arange(max_target_len, device=device).unsqueeze(0))
+    word_positions = word_positions.clamp(0, max_seq_len - 1)
+
+    word_logits_gathered = word_logits.gather(
+        1, word_positions.unsqueeze(-1).expand(-1, -1, vocab_size)
+    )  # (B, max_target_len, vocab_size)
+
+    word_loss_flat = F.cross_entropy(
+        word_logits_gathered.reshape(-1, vocab_size),
+        word_targets.reshape(-1),
+        reduction='none',
+    ).reshape(B, max_target_len)
+
+    word_mask = torch.arange(max_target_len, device=device).unsqueeze(0) < target_lens.unsqueeze(1)
+    word_loss = (word_loss_flat * word_mask).sum() / word_mask.sum().clamp(min=1)
+
+    # --- Position loss (vectorized over all steps) ---
     pos_loss = torch.tensor(0.0, device=device)
-    n_pos_steps = len(pos_targets)
-    if n_pos_steps > 0:
-        for t in range(n_pos_steps):
-            # Hidden states of generated tokens 0..t (t+1 tokens)
-            H_gen = H[0, prefix_len: prefix_len + t + 1, :].unsqueeze(0)  # (1, t+1, d)
-            # Embedding of the token about to be placed
-            z_emb = model.get_embedding_matrix()[word_targets[t + 1]]      # (d,)
-            # Determine boundary indices among the generated tokens seen so far
-            cur_eos_idx = eos_gen_idx if (eos_gen_idx is not None and eos_gen_idx <= t) else None
-            # Position logits: (1, 2*(t+1)) — left/right of each existing token
-            p_logits = model.position_logits(
-                H_gen, z_emb.unsqueeze(0),
-                bos_gen_idx=0,              # first gen token is leftmost boundary
-                eos_gen_idx=cur_eos_idx,    # EOS boundary (if already placed)
-            )  # (1, 2*(t+1))
-            target_p = pos_targets[t].unsqueeze(0)
-            if target_p.item() < p_logits.size(-1):
-                pos_loss = pos_loss + F.cross_entropy(p_logits, target_p)
+    n_pos_valid = 0
 
-        pos_loss = pos_loss / n_pos_steps
+    if max_pos_steps > 0:
+        W = model.get_embedding_matrix()
+        T = max_pos_steps
+
+        # Gather ALL generated-token hidden states in one call.
+        # gen_all_pos[b, t] = position of the (t+1)-th generated token for sample b.
+        gen_all_pos = (
+            prefix_lens.unsqueeze(1) + torch.arange(T, device=device).unsqueeze(0)
+        ).clamp(0, max_seq_len - 1)  # (B, T)
+        H_gen_all = H.gather(
+            1, gen_all_pos.unsqueeze(-1).expand(-1, -1, d_model)
+        )  # (B, T, d_model)
+
+        # Run all three projections once on the full (B, T, d_model) tensor.
+        H_left_all  = model.position_head_left_proj(H_gen_all)   # (B, T, d_model)
+        H_right_all = model.position_head_right_proj(H_gen_all)  # (B, T, d_model)
+        H_state_all = model.position_head_state_proj(H_gen_all)  # (B, T, d_model)
+
+        # z_emb[b, t] = embedding of the token inserted at step t (= word_targets[:, t+1])
+        z_emb_all = W[word_targets[:, 1 : T + 1].clamp(0, vocab_size - 1)]  # (B, T, d_model)
+
+        # query[b, t] = state_proj(last_generated_at_t) + z_emb[t]
+        query_all = H_state_all + z_emb_all  # (B, T, d_model)
+
+        # keys[b, :, :] = [left_all | right_all], shape (B, 2T, d_model)
+        keys_full = torch.cat([H_left_all, H_right_all], dim=1)
+
+        # Full logit matrix via single bmm: (B, T, 2T)
+        logits_full = torch.bmm(query_all, keys_full.transpose(-1, -2))
+
+        # Build full mask (True = mask to -inf).
+        # Causal: at step t, only columns [0..t] (left) and [T..T+t] (right) are valid.
+        t_idx = torch.arange(T, device=device).unsqueeze(1)      # (T, 1)
+        j_idx = torch.arange(2 * T, device=device).unsqueeze(0)  # (1, 2T)
+        left_valid  = (j_idx < T)  & (j_idx <= t_idx)
+        right_valid = (j_idx >= T) & (j_idx <= T + t_idx)
+        full_mask = (~(left_valid | right_valid)).unsqueeze(0).expand(B, -1, -1).clone()  # (B, T, 2T)
+
+        # BOS mask: column 0 (left-of-first-token) always invalid.
+        full_mask[:, :, 0] = True
+
+        # EOS mask: for sample b, mask column T+eos_gen_idx[b] at steps t >= eos_gen_idx[b].
+        eos_valid_b = eos_gen_idxs >= 0  # (B,)
+        if eos_valid_b.any():
+            eos_col = (T + eos_gen_idxs).clamp(0, 2 * T - 1)  # (B,)
+            t_range = torch.arange(T, device=device).unsqueeze(0)  # (1, T)
+            eos_active_bt = eos_valid_b.unsqueeze(1) & (
+                t_range >= eos_gen_idxs.clamp(min=0).unsqueeze(1)
+            )  # (B, T)
+            eos_col_3d = eos_col.view(B, 1, 1).expand(B, T, 1)
+            eos_scatter = torch.zeros(B, T, 2 * T, dtype=torch.bool, device=device)
+            eos_scatter.scatter_(2, eos_col_3d, eos_active_bt.unsqueeze(2))
+            full_mask = full_mask | eos_scatter
+
+        # Apply mask in one call (no in-place on logits for clean autograd).
+        logits_full = logits_full.masked_fill(full_mask, float('-inf'))
+
+        # Detect rows where every logit is -inf (would produce NaN in cross_entropy).
+        all_neginf = (~full_mask).sum(dim=2) == 0  # True if no valid column (B, T)
+
+        # Remap pos_targets from step-local range [0, 2*n_gen) to full column space [0, 2T).
+        # n_gen at step t = t+1; left targets stay as-is, right targets shift by T - n_gen.
+        n_gen_vals = torch.arange(1, T + 1, device=device).unsqueeze(0)  # (1, T)
+        is_right_tgt = pos_targets_pad >= n_gen_vals                       # (B, T)
+        target_col_full = torch.where(
+            is_right_tgt,
+            T + pos_targets_pad - n_gen_vals,
+            pos_targets_pad,
+        ).clamp(0, 2 * T - 1)  # (B, T)
+
+        # Validity: step t is valid for sample b if b has a position target at t.
+        valid_step = (
+            torch.arange(T, device=device).unsqueeze(0) < (target_lens - 1).unsqueeze(1)
+        )  # (B, T)
+        tgt_in_range = pos_targets_pad < 2 * n_gen_vals  # (B, T)
+        valid_mask_pos = valid_step & tgt_in_range & ~all_neginf  # (B, T)
+
+        if valid_mask_pos.any():
+            # Clamp logits to avoid NaN from all-(-inf) rows in cross_entropy.
+            # Values outside [-1e4, 1e4] are clamped; -inf becomes -1e4 (very small but finite).
+            logits_clamped = logits_full.clamp(-1e4, 1e4)
+            loss_all = F.cross_entropy(
+                logits_clamped.reshape(B * T, 2 * T),
+                target_col_full.reshape(B * T),
+                reduction='none',
+            ).reshape(B, T)
+            pos_loss = (loss_all * valid_mask_pos.float()).sum()
+            n_pos_valid = int(valid_mask_pos.sum())
+
+    if n_pos_valid > 0:
+        pos_loss = pos_loss / n_pos_valid
 
     return word_loss + pos_loss
 
@@ -182,40 +344,36 @@ def extract_prefix_and_target(sample, pad_id):
     target_ids_raw = sample["target_ids"]
     loss_mask = sample["loss_mask"]
 
-    prefix_end = (loss_mask == 0).sum().item()
+    # Find the first position where loss_mask == 1 (target starts).
+    # Cannot use (loss_mask == 0).sum() because padding is also 0.
+    ones = (loss_mask == 1).nonzero(as_tuple=True)[0]
+    if len(ones) == 0:
+        return [], []
+    prefix_end = int(ones[0])
     prefix_tokens = input_ids_raw[:prefix_end + 1].tolist()
     target_tokens = target_ids_raw[prefix_end:].tolist()
     target_tokens = [t for t in target_tokens if t != pad_id]
     return prefix_tokens, target_tokens
 
 
-def compute_validation_loss(args, model, val_dataset, pad_id, eos_id, device):
+def compute_validation_loss(args, model, val_dataset, pad_id, eos_id, batch_size, device):
     model.eval()
     val_loss = 0.0
     count = 0
+    n_val = min(len(val_dataset), 200)
 
     with torch.no_grad():
-        for idx in range(min(len(val_dataset), 200)):
-            sample = val_dataset[idx]
-            prefix_tokens, target_tokens = extract_prefix_and_target(sample, pad_id)
-
-            if len(target_tokens) < 2:
+        for start in range(0, n_val, batch_size):
+            end = min(start + batch_size, n_val)
+            samples = [val_dataset[i] for i in range(start, end)]
+            batch = collate_indigo_batch(samples, pad_id, eos_id)
+            if batch is None:
                 continue
 
-            tensors = build_training_tensors(prefix_tokens, target_tokens, eos_id)
-            loss = compute_indigo_loss(
-                model,
-                tensors["input_ids"],
-                tensors["R"],
-                tensors["prefix_len"],
-                tensors["word_targets"],
-                tensors["pos_targets"],
-                tensors["target_len"],
-                tensors["eos_gen_idx"],
-                device,
-            )
-            val_loss += loss.item()
-            count += 1
+            loss = compute_indigo_loss_batched(model, batch, device)
+            batch_actual = batch["input_ids"].size(0)
+            val_loss += loss.item() * batch_actual
+            count += batch_actual
 
     if count > 0:
         val_loss /= count
@@ -256,50 +414,44 @@ def train(args, device):
     global_step = 0
     best_loss = float("inf")
 
+    batch_size = args.batch_size
     for epoch in range(args.epochs):
         epoch_loss = 0.0
+        n_batches = 0
         model.train()
         indices = list(range(len(train_dataset)))
         random.shuffle(indices)
 
-        for step, idx in tqdm(list(enumerate(indices))):
-            sample = train_dataset[idx]
-            prefix_tokens, target_tokens = extract_prefix_and_target(sample, pad_id)
+        n_steps = (len(indices) + batch_size - 1) // batch_size
+        for step in tqdm(range(n_steps)):
+            start = step * batch_size
+            end = min(start + batch_size, len(indices))
+            samples = [train_dataset[indices[i]] for i in range(start, end)]
 
-            if len(target_tokens) < 2:
+            batch = collate_indigo_batch(samples, pad_id, eos_id)
+            if batch is None:
                 continue
 
-            tensors = build_training_tensors(prefix_tokens, target_tokens, eos_id)
-
             optimizer.zero_grad()
-            loss = compute_indigo_loss(
-                model,
-                tensors["input_ids"],
-                tensors["R"],
-                tensors["prefix_len"],
-                tensors["word_targets"],
-                tensors["pos_targets"],
-                tensors["target_len"],
-                tensors["eos_gen_idx"],
-                device,
-            )
+            loss = compute_indigo_loss_batched(model, batch, device)
             loss.backward()
             optimizer.step()
 
             global_step += 1
+            n_batches += 1
             epoch_loss += loss.item()
 
             if args.wandb and step % 100 == 0:
                 wandb.log({"train/loss": loss.item()}, step=global_step)
 
-        epoch_loss /= max(len(indices), 1)
+        epoch_loss /= max(n_batches, 1)
         print(f"Epoch {epoch} | loss={epoch_loss:.4f}")
 
         if args.output_path and epoch_loss < best_loss:
             best_loss = epoch_loss
             torch.save({"model_state_dict": model.state_dict()}, args.output_path)
 
-        val_loss = compute_validation_loss(args, model, val_dataset, pad_id, eos_id, device)
+        val_loss = compute_validation_loss(args, model, val_dataset, pad_id, eos_id, batch_size, device)
         if args.wandb:
             wandb.log({"valid/loss": val_loss}, step=global_step)
 
@@ -313,7 +465,7 @@ def main():
     parser.add_argument("--max_utr5_len", type=int, default=200)
     parser.add_argument("--max_cds_len", type=int, default=500)
     parser.add_argument("--max_utr3_len", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--output_path", type=str, default=None)
