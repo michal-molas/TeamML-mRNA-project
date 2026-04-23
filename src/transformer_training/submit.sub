@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1                     # Use the 4 GPUs available
 #SBATCH --output=out/output.%j               # File for standard output
 #SBATCH --error=err/error.%j                 # File for standard error
-#SBATCH --time=00:20:00                  # Maximum runtime
+#SBATCH --time=10:00:00                  # Maximum runtime
 #SBATCH --partition=booster              # Specified machine partition
 
 # To get number of cpu per task
@@ -21,6 +21,7 @@ time srun python3 finetune.py \
     --pretrained_path model_state_dict/utr53_pretrained.pt \
     --output_path model_state_dict/finetuning_checkpoint.pt \
     --ribonn_weights ../../RiboNN/models/human/0ad046d67ba7481881d5c7f918acedb4/state_dict.pth \
-    --ribonn_weights_folder ../../RiboNN/models/human
+    --ribonn_weights_folder ../../RiboNN/models/human \
+    --wandb
     
 

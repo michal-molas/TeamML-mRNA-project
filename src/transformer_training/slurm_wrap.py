@@ -45,8 +45,12 @@ def run_sbatch(cmd):
 
     return job_id 
 
-def tail_exec(job_id):
-    file_name = f'err/error.{job_id}'
+def tail_exec(job_id, debug):
+    if debug:
+        file_name = f'err/error.{job_id}'
+    else:
+        file_name = f'out/output.{job_id}' 
+
     timeout = 120
     start = time.time()
 
@@ -59,12 +63,6 @@ def tail_exec(job_id):
     os.execvp(cmd[0], cmd)
 
 def run_command(cmd: list[str]) -> int:
-    debug = False
-
-    if cmd[0] in ['--debug', '-d']:
-        debug = True
-        cmd = cmd[1:]
-
     proc = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -86,11 +84,16 @@ def main():
         print("usage: wrap.py [--debug | -d] <cmd> [args...]")
         sys.exit(1)
 
+    debug = False
+    if cmd[0] in ['--debug', '-d']:
+        debug = True
+        cmd = cmd[1:]
+
     job_id = run_sbatch(cmd)
 
     job_id = is_job_running(job_id)
 
-    tail_exec(job_id)
+    tail_exec(job_id, debug)
 
 if __name__ == "__main__":
     main()

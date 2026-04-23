@@ -3,6 +3,7 @@ src/transformer_training/out
 src/transformer_training/err
 src/transformer_training/model_state_dict
 data/state_dictionaries
+*.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

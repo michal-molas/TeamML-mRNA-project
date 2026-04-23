@@ -49,7 +49,7 @@ RIBONN_CONFIG = dict(
 )
 
 
-def load_ribonn(weights_path, device):
+def load_ribonn(weights_path, device, verbose=False):
     """Load frozen RiboNN weights from the submodule. Returns (model, RIBONN_MAX_TX_LEN)."""
 
     config = dict(RIBONN_CONFIG)
@@ -57,9 +57,11 @@ def load_ribonn(weights_path, device):
 
     state_dict = torch.load(weights_path, map_location=device)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    print(
-        f"[ribonn] loaded {weights_path}  missing={len(missing)}  unexpected={len(unexpected)}"
-    )
+
+    if verbose:
+        print(
+            f"[ribonn] loaded {weights_path}  missing={len(missing)}  unexpected={len(unexpected)}"
+        )
 
     model.to(device)
     model.eval()
@@ -144,6 +146,32 @@ def load_pretrained_weights(model, checkpoint_path, device):
         f"Loaded {checkpoint_path}  missing={len(missing)}  unexpected={len(unexpected)}"
     )
 
+def ribonn_predict_using_nested_cross_validation_models(args, device, ribonn_input, batch_width):
+    ## RiboNN.src.predict.predict_using_nested_cross_validation_models() ##
+    RIBONN_COLUMNS = 78
+    run_df = pd.read_csv(args.ribonn_weights_folder + '/runs.csv') 
+    all_predictions = torch.zeros((batch_width, RIBONN_COLUMNS), device=device)
+    prediction_num = 0
+    for test_fold in np.sort(run_df["params.test_fold"].unique()):
+        test_fold_str = str(test_fold)
+        sub_run_df = run_df.query(
+            "`params.test_fold` == @test_fold_str or `params.test_fold` == @test_fold"
+        ).reset_index(drop=True)
+
+        ## RiboNN.src.predict.predict_using_models_trained_in_one_fold() ##
+        top_k_models_to_use = 5
+        sub_run_df = sub_run_df.sort_values("metrics.val_r2", ascending=False).head(top_k_models_to_use)
+
+        for run_id in sub_run_df.run_id:
+            # Create a new model
+            local_state_dict_path = f"{args.ribonn_weights_folder}/{run_id}/state_dict.pth"
+            ribonn_model, _ = load_ribonn(local_state_dict_path, device)
+            all_predictions += ribonn_model(ribonn_input)
+            prediction_num += 1
+
+    all_predictions /= prediction_num
+
+    return all_predictions
 
 def train(args, device):
 
@@ -156,7 +184,7 @@ def train(args, device):
 
     dataset_size = len(dataset)
 
-    val_size = int(0.2 * dataset_size)
+    val_size = int(0.1 * dataset_size)
     train_size = dataset_size - val_size
     train_dataset, val_dataset = random_split(
         dataset,
@@ -200,6 +228,10 @@ def train(args, device):
             utr3_lens = batch["utr3_len"]
             te_label = batch["te_label"]
 
+            # Devalue sequences with low TE label
+            sigmoid_arg = 10 * te_label - 1 
+            lm_loss_mask = torch.nn.Sigmoid()(sigmoid_arg)
+
             optimizer.zero_grad()
             lm_logits = model(input_ids, padding_mask=padding_mask)
 
@@ -209,7 +241,9 @@ def train(args, device):
             
             lm_loss = F.cross_entropy(outputs_flat, targets_flat, reduction='none')
 
-            lm_loss = (lm_loss * loss_mask.view(-1)).sum() / (loss_mask.sum() + 1e-8)
+            loss_mask *= lm_loss_mask.view((-1, 1))
+            lm_loss = lm_loss * loss_mask.view(-1)
+            lm_loss = lm_loss.sum() / (loss_mask.sum() + 1e-8)
 
             # RiboNN loss
             ribonn_loss = torch.tensor(0.0, device=device)
@@ -223,60 +257,12 @@ def train(args, device):
                 label_codons=RIBONN_CONFIG["label_codons"],
             )
 
-            ## RiboNN.src.predict.predict_using_nested_cross_validation_models() ##
-            RIBONN_COLUMNS = 78
-            run_df = pd.read_csv(args.ribonn_weights_folder + '/runs.csv') 
-            all_predictions = torch.zeros((lm_logits.shape[0], RIBONN_COLUMNS), device=device)
-            prediction_num = 0
-            for test_fold in np.sort(run_df["params.test_fold"].unique()):
-                test_fold_str = str(test_fold)
-                sub_run_df = run_df.query(
-                    "`params.test_fold` == @test_fold_str or `params.test_fold` == @test_fold"
-                ).reset_index(drop=True)
-
-                # prediction_df = predict_using_models_trained_in_one_fold(
-                #     sub_run_df, config, dm, top_k_models_to_use
-                # )
-
-                ## RiboNN.src.predict.predict_using_models_trained_in_one_fold() ##
-                # training_data_columns = "TE_108T,TE_12T,TE_A2780,TE_A549,TE_BJ,TE_BRx.142,TE_C643,TE_CRL.1634,TE_Calu.3,TE_Cybrid_Cells,TE_H1.hESC,TE_H1933,TE_H9.hESC,TE_HAP.1,TE_HCC_tumor,TE_HCC_adjancent_normal,TE_HCT116,TE_HEK293,TE_HEK293T,TE_HMECs,TE_HSB2,TE_HSPCs,TE_HeLa,TE_HeLa_S3,TE_HepG2,TE_Huh.7.5,TE_Huh7,TE_K562,TE_Kidney_normal_tissue,TE_LCL,TE_LuCaP.PDX,TE_MCF10A,TE_MCF10A.ER.Src,TE_MCF7,TE_MD55A3,TE_MDA.MB.231,TE_MM1.S,TE_MOLM.13,TE_Molt.3,TE_Mutu,TE_OSCC,TE_PANC1,TE_PATU.8902,TE_PC3,TE_PC9,TE_Primary_CD4._T.cells,TE_Primary_human_bronchial_epithelial_cells,TE_RD.CCL.136,TE_RPE.1,TE_SH.SY5Y,TE_SUM159PT,TE_SW480TetOnAPC,TE_T47D,TE_THP.1,TE_U.251,TE_U.343,TE_U2392,TE_U2OS,TE_Vero_6,TE_WI38,TE_WM902B,TE_WTC.11,TE_ZR75.1,TE_cardiac_fibroblasts,TE_ccRCC,TE_early_neurons,TE_fibroblast,TE_hESC,TE_human_brain_tumor,TE_iPSC.differentiated_dopamine_neurons,TE_megakaryocytes,TE_muscle_tissue,TE_neuronal_precursor_cells,TE_neurons,TE_normal_brain_tissue,TE_normal_prostate,TE_primary_macrophages,TE_skeletal_muscle"
-                # predicted_columns = training_data_columns.replace("TE_", "predicted_TE_").split(",")
-
-                top_k_models_to_use = 5
-                sub_run_df = sub_run_df.sort_values("metrics.val_r2", ascending=False).head(top_k_models_to_use)
-
-                for run_id in sub_run_df.run_id:
-                    # Create a new model
-                    local_state_dict_path = f"{args.ribonn_weights_folder}/{run_id}/state_dict.pth"
-                    ribonn_model, _ = load_ribonn(local_state_dict_path, device)
-                    all_predictions += ribonn_model(ribonn_input)
-                    prediction_num += 1
-
-                    # mean_prediction = torch.stack(predictions, axis=-1).mean(axis=-1)
-                    # print(pred.shape, file=sys.stderr)
-
-                    # fold_df = pd.DataFrame(pred.cpu().detach().numpy(), columns=predicted_columns)
-                    # print(fold_df, file=sys.stderr)
-                    # print(fold_df.shape, file=sys.stderr)
-                    # sys.exit(0)
-
-                # mean_prediction = torch.stack(predictions, axis=-1).mean(axis=-1)
-                # print(mean_prediction.shape, file=sys.stderr)
-
-                # fold_df = pd.DataFrame(mean_prediction.cpu().detach().numpy(), columns=predicted_columns)
-                # print(fold_df, file=sys.stderr)
-                # print(fold_df.shape, file=sys.stderr)
-                # sys.exit(0)
-
-                # df = pd.concat([dm.df, df], axis=1)
-                # return df
-                ##
-
-            ##
-
-            # te_pred = ribonn_model(ribonn_input)
-
-            all_predictions /= prediction_num
+            all_predictions = ribonn_predict_using_nested_cross_validation_models(
+                args=args,
+                device=device,
+                ribonn_input=ribonn_input,
+                batch_width=lm_logits.shape[0],
+            )
             # TODO: How to compare the TE to the label? 
             #       Can our model output results better than the data (then maybe relu)?
             #       Maybe we should just try to maximize the TE and ignore the label?
@@ -332,25 +318,38 @@ def train(args, device):
                     ribonn_max_len,
                     label_codons=RIBONN_CONFIG["label_codons"],
                 )
-                val_te_sum += ribonn_model(ribonn_input).mean().item()
 
+                all_predictions = ribonn_predict_using_nested_cross_validation_models(
+                    args=args,
+                    device=device,
+                    ribonn_input=ribonn_input,
+                    batch_width=lm_logits.shape[0],
+                )
+                val_te_sum += all_predictions.mean().item()
                 val_n += 1
 
         val_lm = val_loss_sum / val_n
         val_te = val_te_sum / val_n
 
         print(
-            f"Epoch {epoch} | train_lm={lm_loss.item():.4f} "
-            f"train_ribonn={ribonn_loss.item():.4f}  val_lm={val_lm:.4f}  val_te={val_te:.4f}"
+            # f"Epoch {epoch} | train_lm={lm_loss.item():.4f} "
+            # f"train_ribonn={ribonn_loss.item():.4f}  val_lm={val_lm:.4f}  val_te={val_te:.4f}"
+            f"Epoch {epoch}"
+            f"val_lm={val_lm:.4f}  val_te={val_te:.4f}"
         )
 
         if args.wandb:
-            wandb.log({"val/lm_loss": val_lm, "val/te": val_te, "epoch": epoch}, step=global_step)
+            wandb.log({"val/lm_loss": val_lm, "val/te": val_te}, step=global_step)
+
+        def _save_checkpoint(checkpoint_name = ""):
+            torch.save({"model_state_dict": model.state_dict()}, args.output_path + checkpoint_name)
+            print(f"[checkpoint] saved → {args.output_path}")
 
         if val_lm < best_val_lm:
             best_val_lm = val_lm
-            torch.save(model.state_dict(), args.output_path)
-            print(f"[checkpoint] saved → {args.output_path}")
+            _save_checkpoint()
+        elif epoch % 20:
+            _save_checkpoint(f"_epoch{epoch}")
 
 
 def main():
@@ -395,6 +394,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--wandb_project", type=str, default="teamml-ribonn-finetune")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -403,7 +403,7 @@ def main():
 
     if args.wandb:
         wandb.init(
-            project="teamml-ribonn-finetune",
+            project=args.wandb_project,
             config=vars(args),
             dir='../../logs',
         )
