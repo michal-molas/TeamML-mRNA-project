@@ -176,11 +176,8 @@ def collate_indigo_batch(samples, pad_id, eos_id):
 
 
 def compute_indigo_loss_batched(model, batch, device):
-    """Compute combined word + position prediction loss for a batch.
-
-    Word loss: gathered from per-sample prefix offsets, masked by target length.
-    Position loss: iterated over generation steps, gathered from per-sample offsets,
-    with per-sample boundary masking.
+    """
+    Compute combined word + position prediction loss for a batch.
     """
     input_ids = batch["input_ids"].to(device)
     R = batch["R"].to(device)
@@ -232,66 +229,65 @@ def compute_indigo_loss_batched(model, batch, device):
         H_gen_all = H.gather(1, gen_all_pos.unsqueeze(-1).expand(-1, -1, d_model))
 
         # Projections for position prediction
-        H_left_all = model.position_head_left_proj(H_gen_all)
-        H_right_all = model.position_head_right_proj(H_gen_all)
-        H_state_all = model.position_head_state_proj(H_gen_all)
+        H_left_all = model.position_head_left_proj(H_gen_all) # H^T * C
+        H_right_all = model.position_head_right_proj(H_gen_all) # H^T * D
+        H_state_all = model.position_head_state_proj(H_gen_all) # h_t^T * E
 
         # Query = state_proj(h) + embedding of token to insert
-        z_emb_all = W[word_targets[:, 1 : T + 1].clamp(0, vocab_size - 1)]
-        query_all = H_state_all + z_emb_all
+        z_emb_all = W[word_targets[:, 1 : T + 1].clamp(0, vocab_size - 1)] # W_[y_{t+1}]
+        query_all = H_state_all + z_emb_all # (h_t^T * E + W_[y_{t+1}])
 
         # Keys = [left_keys | right_keys], compute full logit matrix
-        keys_full = torch.cat([H_left_all, H_right_all], dim=1)
-        logits_full = torch.bmm(query_all, keys_full.transpose(-1, -2))
+        keys_full = torch.cat([H_left_all, H_right_all], dim=1) # [H^T * C | H^T * D]
+        logits_full = torch.bmm(query_all, keys_full.transpose(-1, -2)) # (h_t^T * E + W_[y_{t+1}]) * [H^T * C | H^T * D]^T
 
-        # Causal mask: at step t, only columns [0..t] (left) and [T..T+t] (right) are valid.
+        # Since we are doing this all at once, we need to mask out invalid positions.
+        # At step t, only columns [0..t] (left) and [T..T+t] (right) are valid.
         t_idx = torch.arange(T, device=device).unsqueeze(1)
         j_idx = torch.arange(2 * T, device=device).unsqueeze(0)
         left_valid = (j_idx < T) & (j_idx <= t_idx)
         right_valid = (j_idx >= T) & (j_idx <= T + t_idx)
         full_mask = (~(left_valid | right_valid)).unsqueeze(0).expand(B, -1, -1).clone()
 
-        full_mask[:, :, 0] = True  # BOS column always invalid
+        # BOS column is always invalid
+        full_mask[:, :, 0] = True
 
-        # EOS mask: mask column T+eos_gen_idx at steps t >= eos_gen_idx
-        eos_valid_b = eos_gen_idxs >= 0  # (B,)
-        if eos_valid_b.any():
-            eos_col = (T + eos_gen_idxs).clamp(0, 2 * T - 1)  # (B,)
-            t_range = torch.arange(T, device=device).unsqueeze(0)  # (1, T)
-            eos_active_bt = eos_valid_b.unsqueeze(1) & (
-                t_range >= eos_gen_idxs.clamp(min=0).unsqueeze(1)
-            )  # (B, T)
-            eos_col_3d = eos_col.view(B, 1, 1).expand(B, T, 1)
-            eos_scatter = torch.zeros(B, T, 2 * T, dtype=torch.bool, device=device)
-            eos_scatter.scatter_(2, eos_col_3d, eos_active_bt.unsqueeze(2))
-            full_mask = full_mask | eos_scatter
+        # Mask the EOS column
+        eos_col = (T + eos_gen_idxs).clamp(min=0, max=2 * T - 1)
+        t_range = torch.arange(T, device=device).unsqueeze(0)
+        eos_active_bt = t_range >= eos_gen_idxs.unsqueeze(1)
+        eos_col_3d = eos_col.view(B, 1, 1).expand(B, T, 1)
+        eos_scatter = torch.zeros(B, T, 2 * T, dtype=torch.bool, device=device)
+        eos_scatter.scatter_(2, eos_col_3d, eos_active_bt.unsqueeze(2))
+        full_mask = full_mask | eos_scatter
 
+        # E.g. for T=4, EOS at idx 6, the full mask would look like this:
+        #          |--  LEFT KEYS  --|--  RIGHT KEYS --|
+        #          |  0   1   2   3  |  4   5   6   7  |
+        # ----------------------------------------------
+        # Step t=0 | [X] [X] [X] [X] | [ ] [X] [X] [X] |
+        # Step t=1 | [X] [ ] [X] [X] | [ ] [ ] [X] [X] |
+        # Step t=2 | [X] [ ] [ ] [X] | [ ] [ ] [X] [X] |
+        # Step t=3 | [X] [ ] [ ] [ ] | [ ] [ ] [X] [ ] |
         logits_full = logits_full.masked_fill(full_mask, float('-inf'))
 
-        # Remap targets from step-local range [0, 2*n_gen) to full column space [0, 2T)
+        # Map from local indices to global indices
+        # Left ones stay the same, right ones are shifted by (T - (t+1))
         n_gen_vals = torch.arange(1, T + 1, device=device).unsqueeze(0)
         is_right_tgt = pos_targets_pad >= n_gen_vals
         target_col_full = torch.where(
-            is_right_tgt, T + pos_targets_pad - n_gen_vals, pos_targets_pad
-        ).clamp(0, 2 * T - 1)
+            is_right_tgt, pos_targets_pad + (T - n_gen_vals), pos_targets_pad
+        ).clamp(min=0, max=2 * T - 1)
 
-        # Build validity mask: valid steps AND targets in range AND not pointing to masked columns
+        # Mask out invalid steps (padding, left of BOS, right of EOS)
         valid_step = torch.arange(T, device=device).unsqueeze(0) < (target_lens - 1).unsqueeze(1)
-        tgt_in_range = pos_targets_pad < 2 * n_gen_vals
-        all_neginf = (~full_mask).sum(dim=2) == 0
         bos_mask = target_col_full == 0
-        eos_mask = torch.zeros_like(target_col_full, dtype=torch.bool)
-        if eos_valid_b.any():
-            eos_cols = (T + eos_gen_idxs).clamp(0, 2 * T - 1)
-            for b in range(B):
-                if eos_valid_b[b]:
-                    eos_mask[b] = target_col_full[b] == eos_cols[b]
-        valid_mask_pos = valid_step & tgt_in_range & ~all_neginf & ~bos_mask & ~eos_mask
+        eos_mask = target_col_full == eos_col.unsqueeze(1)
+        valid_mask_pos = valid_step & ~bos_mask & ~eos_mask
 
-        if valid_mask_pos.any():
-            flat_logits = logits_full.reshape(B * T, 2 * T)[valid_mask_pos.reshape(B * T)]
-            flat_targets = target_col_full.reshape(B * T)[valid_mask_pos.reshape(B * T)]
-            pos_loss = F.cross_entropy(flat_logits, flat_targets)
+        flat_logits = logits_full.reshape(B * T, 2 * T)[valid_mask_pos.reshape(B * T)]
+        flat_targets = target_col_full.reshape(B * T)[valid_mask_pos.reshape(B * T)]
+        pos_loss = F.cross_entropy(flat_logits, flat_targets)
 
     return word_loss + pos_loss
 
