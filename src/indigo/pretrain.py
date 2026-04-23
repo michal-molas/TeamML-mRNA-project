@@ -81,7 +81,7 @@ def build_training_tensors(prefix_tokens, target_tokens, eos_id):
     """
 
     # This is the Pre-defined Order (RND)
-    # TODO: beam search
+    # TODO
     target_len = len(target_tokens)
     perm = list(range(target_len))
     random.shuffle(perm)
