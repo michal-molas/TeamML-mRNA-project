@@ -46,7 +46,16 @@ def run_sbatch(cmd):
     return job_id 
 
 def tail_exec(job_id):
-    cmd = ['tail', '-f', f'err/error.{job_id}']
+    file_name = f'err/error.{job_id}'
+    timeout = 120
+    start = time.time()
+
+    while not os.path.exists(file_name):
+        if time.time() - start > timeout:
+            raise TimeoutError("File not created!")
+        time.sleep(1)
+
+    cmd = ['tail', '-f', file_name]
     os.execvp(cmd[0], cmd)
 
 def run_command(cmd: list[str]) -> int:
@@ -55,8 +64,6 @@ def run_command(cmd: list[str]) -> int:
     if cmd[0] in ['--debug', '-d']:
         debug = True
         cmd = cmd[1:]
-
-    
 
     proc = subprocess.run(
         cmd,
@@ -82,8 +89,6 @@ def main():
     job_id = run_sbatch(cmd)
 
     job_id = is_job_running(job_id)
-
-    time.sleep(40)
 
     tail_exec(job_id)
 

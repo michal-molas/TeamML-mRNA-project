@@ -224,8 +224,10 @@ def train(args, device):
             )
 
             ## RiboNN.src.predict.predict_using_nested_cross_validation_models() ##
+            RIBONN_COLUMNS = 78
             run_df = pd.read_csv(args.ribonn_weights_folder + '/runs.csv') 
-            all_prediction_dfs = []
+            all_predictions = torch.zeros((lm_logits.shape[0], RIBONN_COLUMNS), device=device)
+            prediction_num = 0
             for test_fold in np.sort(run_df["params.test_fold"].unique()):
                 test_fold_str = str(test_fold)
                 sub_run_df = run_df.query(
@@ -237,47 +239,48 @@ def train(args, device):
                 # )
 
                 ## RiboNN.src.predict.predict_using_models_trained_in_one_fold() ##
-                top_k_models_to_use = 1
-                training_data_columns = "TE_108T,TE_12T,TE_A2780,TE_A549,TE_BJ,TE_BRx.142,TE_C643,TE_CRL.1634,TE_Calu.3,TE_Cybrid_Cells,TE_H1.hESC,TE_H1933,TE_H9.hESC,TE_HAP.1,TE_HCC_tumor,TE_HCC_adjancent_normal,TE_HCT116,TE_HEK293,TE_HEK293T,TE_HMECs,TE_HSB2,TE_HSPCs,TE_HeLa,TE_HeLa_S3,TE_HepG2,TE_Huh.7.5,TE_Huh7,TE_K562,TE_Kidney_normal_tissue,TE_LCL,TE_LuCaP.PDX,TE_MCF10A,TE_MCF10A.ER.Src,TE_MCF7,TE_MD55A3,TE_MDA.MB.231,TE_MM1.S,TE_MOLM.13,TE_Molt.3,TE_Mutu,TE_OSCC,TE_PANC1,TE_PATU.8902,TE_PC3,TE_PC9,TE_Primary_CD4._T.cells,TE_Primary_human_bronchial_epithelial_cells,TE_RD.CCL.136,TE_RPE.1,TE_SH.SY5Y,TE_SUM159PT,TE_SW480TetOnAPC,TE_T47D,TE_THP.1,TE_U.251,TE_U.343,TE_U2392,TE_U2OS,TE_Vero_6,TE_WI38,TE_WM902B,TE_WTC.11,TE_ZR75.1,TE_cardiac_fibroblasts,TE_ccRCC,TE_early_neurons,TE_fibroblast,TE_hESC,TE_human_brain_tumor,TE_iPSC.differentiated_dopamine_neurons,TE_megakaryocytes,TE_muscle_tissue,TE_neuronal_precursor_cells,TE_neurons,TE_normal_brain_tissue,TE_normal_prostate,TE_primary_macrophages,TE_skeletal_muscle"
-                predicted_columns = training_data_columns.replace("TE_", "predicted_TE_").split(",")
+                # training_data_columns = "TE_108T,TE_12T,TE_A2780,TE_A549,TE_BJ,TE_BRx.142,TE_C643,TE_CRL.1634,TE_Calu.3,TE_Cybrid_Cells,TE_H1.hESC,TE_H1933,TE_H9.hESC,TE_HAP.1,TE_HCC_tumor,TE_HCC_adjancent_normal,TE_HCT116,TE_HEK293,TE_HEK293T,TE_HMECs,TE_HSB2,TE_HSPCs,TE_HeLa,TE_HeLa_S3,TE_HepG2,TE_Huh.7.5,TE_Huh7,TE_K562,TE_Kidney_normal_tissue,TE_LCL,TE_LuCaP.PDX,TE_MCF10A,TE_MCF10A.ER.Src,TE_MCF7,TE_MD55A3,TE_MDA.MB.231,TE_MM1.S,TE_MOLM.13,TE_Molt.3,TE_Mutu,TE_OSCC,TE_PANC1,TE_PATU.8902,TE_PC3,TE_PC9,TE_Primary_CD4._T.cells,TE_Primary_human_bronchial_epithelial_cells,TE_RD.CCL.136,TE_RPE.1,TE_SH.SY5Y,TE_SUM159PT,TE_SW480TetOnAPC,TE_T47D,TE_THP.1,TE_U.251,TE_U.343,TE_U2392,TE_U2OS,TE_Vero_6,TE_WI38,TE_WM902B,TE_WTC.11,TE_ZR75.1,TE_cardiac_fibroblasts,TE_ccRCC,TE_early_neurons,TE_fibroblast,TE_hESC,TE_human_brain_tumor,TE_iPSC.differentiated_dopamine_neurons,TE_megakaryocytes,TE_muscle_tissue,TE_neuronal_precursor_cells,TE_neurons,TE_normal_brain_tissue,TE_normal_prostate,TE_primary_macrophages,TE_skeletal_muscle"
+                # predicted_columns = training_data_columns.replace("TE_", "predicted_TE_").split(",")
 
+                top_k_models_to_use = 5
                 sub_run_df = sub_run_df.sort_values("metrics.val_r2", ascending=False).head(top_k_models_to_use)
 
-                predictions = []
-                # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
                 for run_id in sub_run_df.run_id:
                     # Create a new model
                     local_state_dict_path = f"{args.ribonn_weights_folder}/{run_id}/state_dict.pth"
                     ribonn_model, _ = load_ribonn(local_state_dict_path, device)
-                    ribonn_model.to(device)
-                    ribonn_model.eval()
-                    predictions.append(ribonn_model(ribonn_input))
+                    all_predictions += ribonn_model(ribonn_input)
+                    prediction_num += 1
 
-                mean_prediction = torch.stack(predictions, axis=-1).mean(axis=-1)
-                print(mean_prediction.shape, file=sys.stderr)
+                    # mean_prediction = torch.stack(predictions, axis=-1).mean(axis=-1)
+                    # print(pred.shape, file=sys.stderr)
 
-                fold_df = pd.DataFrame(mean_prediction.detach().numpy(), columns=predicted_columns)
-                print(fold_df, file=sys.stderr)
-                print(fold_df.shape, file=sys.stderr)
+                    # fold_df = pd.DataFrame(pred.cpu().detach().numpy(), columns=predicted_columns)
+                    # print(fold_df, file=sys.stderr)
+                    # print(fold_df.shape, file=sys.stderr)
+                    # sys.exit(0)
 
-                sys.exit(0)
+                # mean_prediction = torch.stack(predictions, axis=-1).mean(axis=-1)
+                # print(mean_prediction.shape, file=sys.stderr)
+
+                # fold_df = pd.DataFrame(mean_prediction.cpu().detach().numpy(), columns=predicted_columns)
+                # print(fold_df, file=sys.stderr)
+                # print(fold_df.shape, file=sys.stderr)
+                # sys.exit(0)
 
                 # df = pd.concat([dm.df, df], axis=1)
                 # return df
                 ##
 
-                fold_df["fold"] = int(test_fold)
-                all_prediction_dfs.append(fold_df)
-
-            all_predictions = pd.concat(all_prediction_dfs, axis=0, ignore_index=True)
             ##
 
             # te_pred = ribonn_model(ribonn_input)
 
+            all_predictions /= prediction_num
             # TODO: How to compare the TE to the label? 
             #       Can our model output results better than the data (then maybe relu)?
             #       Maybe we should just try to maximize the TE and ignore the label?
-            ribonn_loss = F.mse_loss(te_pred.mean(dim=-1), te_label)
+            ribonn_loss = F.mse_loss(all_predictions.mean(dim=-1), te_label)
 
             loss = lm_loss + args.lambda_ribonn * ribonn_loss
             loss.backward()
