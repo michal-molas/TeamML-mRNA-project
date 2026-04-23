@@ -148,16 +148,16 @@ def collate_indigo_batch(samples, pad_id, eos_id):
     eos_gen_idxs = torch.full((B,), -1, dtype=torch.long)
 
     for i, t in enumerate(batch_tensors):
-        sl = t["input_ids"].size(0)
-        tl = t["target_len"]
-        pl = t["pos_targets"].size(0)
+        seq_len = t["input_ids"].size(0)
+        target_len = t["target_len"]
+        pos_steps = t["pos_targets"].size(0)
 
-        input_ids[i, :sl] = t["input_ids"]
-        R[i, :sl, :sl] = t["R"]
-        attention_mask[i, :sl] = False
-        word_targets[i, :tl] = t["word_targets"]
-        if pl > 0:
-            pos_targets[i, :pl] = t["pos_targets"]
+        input_ids[i, :seq_len] = t["input_ids"]
+        R[i, :seq_len, :seq_len] = t["R"]
+        attention_mask[i, :seq_len] = False
+        word_targets[i, :target_len] = t["word_targets"]
+        if pos_steps > 0:
+            pos_targets[i, :pos_steps] = t["pos_targets"]
         prefix_lens[i] = t["prefix_len"]
         target_lens[i] = t["target_len"]
         if t["eos_gen_idx"] is not None:
