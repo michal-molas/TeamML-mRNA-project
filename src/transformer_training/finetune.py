@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "RiboNN"))
 from RiboNN.src.model import RiboNN
 from models import MRNACsvDataset, MRNATransformer
+from utils import load_pretrained_weights
 
 RIBONN_MAX_TX_LEN = 1_381 + 11_937  # 13318
 
@@ -136,15 +137,6 @@ def build_ribonn_input(
 
     return out  # (N, num_channels, ribonn_max_len)
 
-
-def load_pretrained_weights(model, checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    print(
-        f"Loaded {checkpoint_path}  missing={len(missing)}  unexpected={len(unexpected)}"
-    )
 
 def ribonn_predict_using_nested_cross_validation_models(args, device, ribonn_input, batch_width):
     ## RiboNN.src.predict.predict_using_nested_cross_validation_models() ##

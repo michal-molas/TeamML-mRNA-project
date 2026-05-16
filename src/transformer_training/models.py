@@ -5,6 +5,47 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 
+MRNA_VOCAB = {
+    'A': 0,
+    'U': 1,
+    'T': 1,
+    'C': 2,
+    'G': 3,
+    '<PAD>': 4,
+    '<BOS>': 5,
+    '<EOS>': 6,
+    '<CDS>': 7,
+    '<UTR5>': 8,
+    '<UTR3>': 9,
+}
+
+class MRNATokenizer:
+    def __init__(self, only_utr5=False):
+        self.vocab = MRNA_VOCAB.copy()
+
+        if only_utr5:
+            self.vocab.pop('<UTR3>', None)
+
+        self.id_to_token = {v: k for k, v in self.vocab.items() if k != 'U'}
+
+        self.vocab_size = len(set(self.vocab.values()))
+        self.pad_id = self.vocab['<PAD>']
+        self.bos_id = self.vocab['<BOS>']
+        self.eos_id = self.vocab['<EOS>']
+        self.cds_id = self.vocab['<CDS>']
+        self.utr5_id = self.vocab['<UTR5>']
+        self.utr3_id = self.vocab.get('<UTR3>')
+
+    def tokenize(self, seq):
+        return [self.vocab.get(n, self.pad_id) for n in str(seq).upper()]
+
+    def detokenize(self, token_ids):
+        # ignore special tokens, return only ACTG
+        tokens = [self.id_to_token.get(token_id, '') for token_id in token_ids]
+        chars = [t for t in tokens if t in {'A', 'C', 'G', 'T'}]
+        return ''.join(chars)
+
+
 class MRNACsvDataset(Dataset):
     def __init__(
         self,
@@ -13,6 +54,7 @@ class MRNACsvDataset(Dataset):
         max_cds_len=8192,
         max_utr3_len=2048,
         only_utr5=False,
+        tokenizer=None,
     ):
         dataframe = None
         if (csv_path.split('.')[-1] == 'xlsx'):
@@ -32,28 +74,19 @@ class MRNACsvDataset(Dataset):
         else:
             self.max_len = (max_utr5_len + max_cds_len + max_utr3_len + 5) - 1
 
-        self.vocab = {
-            'A': 0,
-            'U': 1,
-            'T': 1,
-            'C': 2,
-            'G': 3,
-            '<PAD>': 4,
-            '<BOS>': 5,
-            '<EOS>': 6,
-            '<CDS>': 7,
-            '<UTR5>': 8,
-        }
-        if not self.only_utr5:
-            self.vocab['<UTR3>'] = 9
+        if tokenizer is None:
+            self.tokenizer = MRNATokenizer(only_utr5=only_utr5)
+        else:
+            self.tokenizer = tokenizer
 
-        self.vocab_size = len(set(self.vocab.values()))
-        self.pad_id = self.vocab['<PAD>']
-        self.bos_id = self.vocab['<BOS>']
-        self.eos_id = self.vocab['<EOS>']
-        self.cds_id = self.vocab['<CDS>']
-        self.utr5_id = self.vocab['<UTR5>']
-        self.utr3_id = self.vocab.get('<UTR3>')
+        self.vocab = self.tokenizer.vocab
+        self.vocab_size = self.tokenizer.vocab_size
+        self.pad_id = self.tokenizer.pad_id
+        self.bos_id = self.tokenizer.bos_id
+        self.eos_id = self.tokenizer.eos_id
+        self.cds_id = self.tokenizer.cds_id
+        self.utr5_id = self.tokenizer.utr5_id
+        self.utr3_id = self.tokenizer.utr3_id
 
         has_te = 'te' in self.df.columns
 
@@ -68,9 +101,9 @@ class MRNACsvDataset(Dataset):
             cds_str = str(row["cds"]).upper()
             utr3_str = str(row["utr3"])[:self.max_utr3_len].upper()
 
-            utr5_tokens = self.tokenize(utr5_str)
-            cds_tokens = self.tokenize(cds_str)
-            utr3_tokens = self.tokenize(utr3_str)
+            utr5_tokens = self.tokenizer.tokenize(utr5_str)
+            cds_tokens = self.tokenizer.tokenize(cds_str)
+            utr3_tokens = self.tokenizer.tokenize(utr3_str)
             utr5_len = len(utr5_tokens)
             cds_len = len(cds_tokens)
             utr3_len = len(utr3_tokens)
@@ -95,9 +128,6 @@ class MRNACsvDataset(Dataset):
 
     def __len__(self):
         return len(self.tokenized_samples)
-
-    def tokenize(self, seq):
-        return [self.vocab.get(n, self.pad_id) for n in seq]
 
     def __getitem__(self, idx):
         utr5_tokens, cds_tokens, utr3_tokens, te = self.tokenized_samples[idx]
