@@ -45,8 +45,21 @@ def run_sbatch(cmd):
 
     return job_id 
 
-def tail_exec(job_id):
-    cmd = ['tail', '-f', f'err/error.{job_id}']
+def tail_exec(job_id, debug):
+    if debug:
+        file_name = f'err/error.{job_id}'
+    else:
+        file_name = f'out/output.{job_id}' 
+
+    timeout = 120
+    start = time.time()
+
+    while not os.path.exists(file_name):
+        if time.time() - start > timeout:
+            raise TimeoutError("File not created!")
+        time.sleep(1)
+
+    cmd = ['tail', '-f', file_name]
     os.execvp(cmd[0], cmd)
 
 def run_command(cmd: list[str]) -> int:
@@ -68,16 +81,19 @@ def run_command(cmd: list[str]) -> int:
 def main():
     cmd = sys.argv[1:]
     if not cmd:
-        print("usage: wrap.py <cmd> [args...]")
+        print("usage: wrap.py [--debug | -d] <cmd> [args...]")
         sys.exit(1)
+
+    debug = False
+    if cmd[0] in ['--debug', '-d']:
+        debug = True
+        cmd = cmd[1:]
 
     job_id = run_sbatch(cmd)
 
     job_id = is_job_running(job_id)
 
-    time.sleep(20)
-
-    tail_exec(job_id)
+    tail_exec(job_id, debug)
 
 if __name__ == "__main__":
     main()

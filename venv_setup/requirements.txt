@@ -7,3 +7,9 @@ tqdm
 Bio
 ipykernel
 dotenv
+mlflow
+pytorch-lightning
+lightning-utilities
+torchmetrics
+scikit-learn
+openpyxl

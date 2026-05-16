@@ -11,13 +11,12 @@ from dotenv import load_dotenv
 
 from models import MRNACsvDataset, MRNATransformer
 
-
 def compute_validation_loss(args, model, valid_dataloader, global_step, device):
     model.eval()
     val_loss = 0.0
 
     with torch.no_grad():
-        for step, batch in list(enumerate(valid_dataloader)):
+        for _, batch in list(enumerate(valid_dataloader)):
             input_ids = batch["input_ids"].to(device)
             target_ids = batch["target_ids"].to(device)
             loss_mask = batch["loss_mask"].to(device)
@@ -40,22 +39,23 @@ def compute_validation_loss(args, model, valid_dataloader, global_step, device):
             step=global_step,
         )
 
+    return val_loss.item()
+
 def train(args, device, only_utr5=False):
-    dataset = MRNACsvDataset(
-        csv_path=args.csv_path,
+    train_dataset = MRNACsvDataset(
+        csv_path=args.train_csv_path,
         max_utr5_len=args.max_utr5_len,
         max_cds_len=args.max_cds_len,
         max_utr3_len=args.max_utr3_len,
         only_utr5=only_utr5,
     )
 
-    dataset_size = len(dataset)
-
-    val_size = int(0.2 * dataset_size)
-    train_size = dataset_size - val_size
-
-    train_dataset, val_dataset = random_split(
-        dataset, [train_size, val_size]
+    val_dataset = MRNACsvDataset(
+        csv_path=args.test_csv_path,
+        max_utr5_len=args.max_utr5_len,
+        max_cds_len=args.max_cds_len,
+        max_utr3_len=args.max_utr3_len,
+        only_utr5=only_utr5,
     )
 
     print(f"Train dataset length: {len(train_dataset)}", file=sys.stderr)
@@ -65,11 +65,11 @@ def train(args, device, only_utr5=False):
     valid_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
 
     model = MRNATransformer(
-        vocab_size=dataset.vocab_size,
+        vocab_size=train_dataset.vocab_size,
         d_model=args.d_model,
         nhead=args.n_heads,
         num_layers=args.n_layers,
-        max_len=dataset.max_len,
+        max_len=max(train_dataset.max_len, val_dataset.max_len),
     ).to(device)
 
     global_step = 0
@@ -112,25 +112,27 @@ def train(args, device, only_utr5=False):
         epoch_loss /= len(dataloader)
         print(f"Epoch {epoch} | loss={epoch_loss:.4f}")
 
-        if args.output_path and epoch_loss < best_loss:
-            best_loss = epoch_loss
-            torch.save({"model_state_dict": model.state_dict()}, args.output_path)
-        compute_validation_loss(args, model, valid_dataloader, global_step, device)
+        valid_loss = compute_validation_loss(args, model, valid_dataloader, global_step, device)
 
+        if args.output_path and valid_loss < best_loss:
+            best_loss = valid_loss 
+            torch.save({"model_state_dict": model.state_dict()}, args.output_path)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--csv_path", type=str, default="../../data/pretraining/pretraining_refseq.csv")
-    parser.add_argument("--n_layers", type=int, default=4)
+    parser.add_argument("--train_csv_path", type=str, default="../../data/pretraining/dataset_with_utr3/train.csv")
+    parser.add_argument("--test_csv_path", type=str, default="../../data/pretraining/dataset_with_utr3/test.csv")
+    parser.add_argument("--n_layers", type=int, default=6)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--max_utr5_len", type=int, default=200)
     parser.add_argument("--max_cds_len", type=int, default=500)
     parser.add_argument("--max_utr3_len", type=int, default=200)
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--output_path", type=str, default=None)
+    parser.add_argument("--input_path", type=str, default=None)
     parser.add_argument("--wandb", action="store_true")
     args = parser.parse_args()
 
@@ -140,12 +142,12 @@ def main():
 
     if args.wandb:
         wandb.init(
-            project="transformer-parameter-grid",
+            project="transformer-pretraining",
             config=vars(args),
             dir='../../logs',
         )
 
-    only_utr5 = False
+    only_utr5 = False 
     train(args, device, only_utr5)
 
     if args.wandb:
