@@ -28,3 +28,21 @@ class StringStatisticsExtractor(FeatureExtractor):
             "utr5_length": samples["utr5"].apply(len),
             "utr3_length": samples["utr3"].apply(len),
         })
+
+    
+class GCContentExtractor(FeatureExtractor):
+    def __init__(self):
+        super().__init__()
+
+    @staticmethod
+    def gc_content(seq: str) -> float:
+        gc_count = seq.count("G") + seq.count("C")
+        total_count = len(seq)
+        return gc_count / total_count if total_count > 0 else 0.0
+
+    def extract_row_features(self, row) -> dict[str, float]:
+        return {
+            "utr5_gc_content": self.gc_content(row["utr5"]),
+            "cds_gc_content": self.gc_content(row["cds"]),
+            "utr3_gc_content": self.gc_content(row["utr3"]),
+        }

@@ -12,6 +12,7 @@ scoring_models:
   #   weights_folder: RiboNN/models/human
   #   top_k_models_to_use: 5
   #   batch_size: 32
+  - type: RNAfold
 
 aggregators:
   - type: SimpleAverage

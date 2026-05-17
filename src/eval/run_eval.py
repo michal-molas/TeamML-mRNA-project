@@ -11,10 +11,19 @@ import yaml
 from eval import FeatureExtractor, ScoringModel, Aggregator, EvalConfig
 from schemas import SAMPLE_CSV_COLS, SAMPLE_INDEX_COLS
 
-from feature_extractors import StringStatisticsExtractor
-from scoring_models import RiboNN
-from aggregators import SimpleAverageAggregator
-from plots import feature_distribution
+from feature_extractors import (
+    StringStatisticsExtractor,
+)
+from scoring_models import (
+    RiboNN,
+    RNAfold,
+)
+from aggregators import (
+    SimpleAverageAggregator,
+)
+from plots import (
+    feature_distribution,
+)
 
 
 EVAL_DIR = "data/evals"
@@ -25,6 +34,7 @@ FEATURE_EXTRACTORS = {
 
 SCORING_MODELS = {
     "RiboNN": RiboNN,
+    "RNAfold": RNAfold,
 }
 
 AGGREGATORS = {
@@ -168,7 +178,7 @@ def main() -> None:
     parser = _get_parser()
     args = parser.parse_args()
 
-    samples_df = pd.read_csv(args.samples_csv)
+    samples_df = pd.read_csv(args.samples_csv).fillna("")
     print(f"Loaded {len(samples_df)} samples from {args.samples_csv}")
 
     config = load_config(args.config)

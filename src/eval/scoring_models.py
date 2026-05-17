@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 import torch
+import RNA
 
 try:
     from .eval import ScoringModel
@@ -109,3 +110,32 @@ class RiboNN(ScoringModel):
                 all_predictions[start:end] += model(ribonn_input[start:end])
 
         return all_predictions.cpu()
+
+
+class RNAfold(ScoringModel):
+    def __init__(self, score_name: str = "rnafold_mfe"):
+        super().__init__()
+        self.score_name = score_name
+
+    def score_row(self, row) -> dict[str, float]:
+        seq = row.get("utr5", "") + row.get("cds", "") + row.get("utr3", "")
+        structure, mfe = RNA.fold(seq)
+        return {self.score_name: float(mfe)}
+
+
+class UTRLM(ScoringModel):
+    def __init__(self, score_name: str = "utrlm_score"):
+        super().__init__()
+        self.score_name = score_name
+
+    def score_row(self, row) -> dict[str, float]:
+        raise NotImplementedError("UTRLM scoring not implemented yet")
+
+
+class Saluki(ScoringModel):
+    def __init__(self, score_name: str = "stability_score"):
+        super().__init__()
+        self.score_name = score_name
+
+    def score_row(self, row) -> dict[str, float]:
+        raise NotImplementedError("Saluki scoring not implemented yet")
