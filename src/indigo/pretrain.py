@@ -67,7 +67,52 @@ def compute_position_targets(perm):
     return position_targets
 
 
-def build_training_tensors(prefix_tokens, target_tokens, eos_id):
+def make_generation_perm(target_len, gen_order):
+    """Build a generation permutation for a given order strategy.
+
+    gen_order: 'random' | 'l2r' | 'r2l' | 'inward' | 'outward'
+      - random: uniform random shuffle
+      - l2r:    left-to-right (0, 1, ..., n-1)
+      - r2l:    right-to-left (n-1, ..., 1, 0)
+      - outward: center -> out (mid, mid+1, mid-1, mid+2, mid-2, ...)
+      - inward:  out -> center (0, n-1, 1, n-2, ..., mid)
+    """
+    if gen_order == "random":
+        perm = list(range(target_len))
+        random.shuffle(perm)
+    elif gen_order == "l2r":
+        perm = list(range(target_len))
+    elif gen_order == "r2l":
+        perm = list(range(target_len - 1, -1, -1))
+    elif gen_order == "outward":
+        mid = (target_len - 1) // 2
+        perm = [mid]
+        left = mid - 1
+        right = mid + 1
+        while left >= 0 or right < target_len:
+            if right < target_len:
+                perm.append(right)
+                right += 1
+            if left >= 0:
+                perm.append(left)
+                left -= 1
+    elif gen_order == "inward":
+        perm = []
+        left = 0
+        right = target_len - 1
+        while left <= right:
+            perm.append(left)
+            if left != right:
+                perm.append(right)
+            left += 1
+            right -= 1
+
+    else:
+        raise ValueError(f"Unknown gen_order: {gen_order}")
+    return perm
+
+
+def build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order="random"):
     """Build permuted training tensors for one sample.
 
     Returns dict with:
@@ -80,11 +125,8 @@ def build_training_tensors(prefix_tokens, target_tokens, eos_id):
       - target_len: int
     """
 
-    # This is the Pre-defined Order (RND)
-    # TODO
     target_len = len(target_tokens)
-    perm = list(range(target_len))
-    random.shuffle(perm)
+    perm = make_generation_perm(target_len, gen_order)
 
     permuted_target = [target_tokens[perm[t]] for t in range(target_len)]
 
@@ -114,7 +156,7 @@ def build_training_tensors(prefix_tokens, target_tokens, eos_id):
     }
 
 
-def collate_indigo_batch(samples, pad_id, eos_id):
+def collate_indigo_batch(samples, pad_id, eos_id, gen_order="random"):
     """Collate a list of dataset samples into a padded batch for INDIGO training.
 
     Each sample is processed through extract_prefix_and_target + build_training_tensors,
@@ -127,7 +169,7 @@ def collate_indigo_batch(samples, pad_id, eos_id):
         prefix_tokens, target_tokens = extract_prefix_and_target(sample, pad_id)
         if len(target_tokens) < 2:
             continue
-        tensors = build_training_tensors(prefix_tokens, target_tokens, eos_id)
+        tensors = build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order)
         batch_tensors.append(tensors)
 
     if len(batch_tensors) == 0:
@@ -320,7 +362,7 @@ def compute_validation_loss(args, model, val_dataset, pad_id, eos_id, batch_size
         for start in range(0, n_val, batch_size):
             end = min(start + batch_size, n_val)
             samples = [val_dataset[i] for i in range(start, end)]
-            batch = collate_indigo_batch(samples, pad_id, eos_id)
+            batch = collate_indigo_batch(samples, pad_id, eos_id, args.gen_order)
             if batch is None:
                 continue
 
@@ -382,7 +424,7 @@ def train(args, device):
             end = min(start + batch_size, len(indices))
             samples = [train_dataset[indices[i]] for i in range(start, end)]
 
-            batch = collate_indigo_batch(samples, pad_id, eos_id)
+            batch = collate_indigo_batch(samples, pad_id, eos_id, args.gen_order)
             if batch is None:
                 continue
 
@@ -423,6 +465,9 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--output_path", type=str, default=None)
+    parser.add_argument("--gen_order", type=str, default="random",
+                        choices=["random", "l2r", "r2l", "inward"],
+                        help="Generation order: random | l2r | r2l | inward")
     parser.add_argument("--wandb", action="store_true")
     args = parser.parse_args()
 
