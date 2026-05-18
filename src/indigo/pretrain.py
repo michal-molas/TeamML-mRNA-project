@@ -124,7 +124,7 @@ def _extend_R(R_prev, abs_pos_prev, new_abs_pos_val):
 
 
 @torch.no_grad()
-def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, n_init=10):
+def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, device, n_init=10):
     target_len = len(target_tokens)
     prefix_len = len(prefix_tokens)
     W = model.get_embedding_matrix()  # (vocab_size, d_model)
@@ -201,31 +201,57 @@ def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, n_
             pos_valid = pos_valid_base.clone()
             if 0 <= eos_col < 2 * t:
                 pos_valid[eos_col] = False
-            
-            for token_idx in beam["remaining"]:
-                token = target_tokens[token_idx]
-                word_score = log_prob_word[b_idx, token].item()
 
-                # Insertion position for token_idx given current sorted order
-                pos_after_insert = bisect.bisect_left(beam["sorted_placed"], token_idx)
-                if pos_after_insert == 0:
-                    # Left of first token
-                    insertion_slot = beam["gen_idx_map"][beam["sorted_placed"][0]]
-                else:
-                    # Right of (pos_after_insert - 1)th token
-                    insertion_slot = t + beam["gen_idx_map"][beam["sorted_placed"][pos_after_insert - 1]]
+            remaining_list = list(beam["remaining"])
+            tokens_rem = torch.tensor(
+                [target_tokens[i] for i in remaining_list],
+                dtype=torch.long, device=device
+            )  # (n_rem,)
 
-                # Position score (consistent with training loss)
-                if not pos_valid[insertion_slot]:
-                    pos_score = 0.0
-                else:
-                    z_emb    = W[token]                                 # (d_model,)
-                    query    = state[b_idx] + z_emb                     # (d_model,)
-                    p_logits = query @ keys[b_idx].T                    # (2t,)
-                    p_logits = p_logits.masked_fill(~pos_valid, float("-inf"))
-                    pos_score = F.log_softmax(p_logits, dim=-1)[insertion_slot].item()
+            # Word scores for all remaining tokens
+            word_scores = log_prob_word[b_idx, tokens_rem]  # (n_rem,)
 
-                all_candidates.append((beam["score"] + word_score + pos_score, b_idx, token_idx))
+            # Insertion position for each remaining token given current sorted order
+            sorted_placed_tensor = torch.tensor(
+                beam["sorted_placed"], dtype=torch.long, device=device
+            )  # (t,)
+
+            gen_steps = torch.tensor(
+                [beam["gen_idx_map"][sp] for sp in beam["sorted_placed"]],
+                dtype=torch.long, device=device
+            )  # (t,)
+
+            remaining_t = torch.tensor(
+                remaining_list, dtype=torch.long, device=device
+            )  # (n_rem,)
+
+            # pos_after_insert: number of sorted_placed entries strictly less than each remaining token
+            pos_after_insert = (
+                sorted_placed_tensor.unsqueeze(0) < remaining_t.unsqueeze(1)
+            ).sum(dim=1)  # (n_rem,)
+
+            predecessor_idx = torch.clamp(pos_after_insert - 1, min=0)  # (n_rem,)
+
+            # Left of first token: gen_steps[0]; Right of predecessor: t + gen_steps[predecessor_idx]
+            insertion_slots = torch.where(
+                pos_after_insert == 0, gen_steps[0], t + gen_steps[predecessor_idx]
+            )  # (n_rem,)
+
+            # Position score (consistent with training loss)
+            queries = state[b_idx].unsqueeze(0) + W[tokens_rem] # (n_rem, d_model)
+            pos_logits = queries @ keys[b_idx].T # (n_rem, 2t)
+            pos_logits = pos_logits.masked_fill(~pos_valid.unsqueeze(0), float("-inf"))
+            log_p_pos = F.log_softmax(pos_logits, dim=-1) # (n_rem, 2t)
+            pos_scores = log_p_pos[torch.arange(len(remaining_list), device=device), insertion_slots]
+            pos_scores = torch.where(
+                pos_valid[insertion_slots],
+                pos_scores,
+                torch.zeros_like(pos_scores)
+            )  # 0.0 if slot invalid
+
+            combined = beam["score"] + word_scores + pos_scores # (n_rem,)
+            for k, token_idx in enumerate(remaining_list):
+                all_candidates.append((combined[k].item(), b_idx, token_idx))
 
         # Update beams with new best candidates
         all_candidates.sort(key=lambda x: -x[0])
