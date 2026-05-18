@@ -124,32 +124,15 @@ def _extend_R(R_prev, abs_pos_prev, new_abs_pos_val):
 
 
 @torch.no_grad()
-def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, device):
-    """
-    
-
-    
-    Find the top-beam_size generation permutations via beam search over permutation space.
-
-    At each step the beam is expanded by scoring every remaining token (and its
-    uniquely-determined INDIGO insertion position) for every active beam.  The
-    global top-beam_size candidates are kept.  Runs entirely under no_grad; the
-    model should be in eval() mode before calling this function.
-
-    Returns a list of beam_size permutations (each a list of target_len absolute
-    target indices).  May return fewer than beam_size perms when target_len is
-    smaller than beam_size.
-    """
+def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, n_init=10):
     target_len = len(target_tokens)
     prefix_len = len(prefix_tokens)
     W = model.get_embedding_matrix()  # (vocab_size, d_model)
+    n_init = min(n_init, target_len)
 
     # --------- Step 0 ---------
-    # Since the only meaningful thing at the beginning are the token probabilities,
-    # we have to pick the starting token based on this.
-    # Since there are only 4 nucleotides, this will likely cause the beams to start with the same token.
-    # In order to diversify the beams, e.g. not pick all positions from the beggining of the target,
-    # we randomly sample the positions among the most likely tokens.
+    # Since we only have 4 nucleotide types, we cannot really determine what are the best first tokens to generate.
+    # So instead we will sample n_init starting positions and use them as initial permutation (sorted).
     
     ids_prefix = torch.tensor(prefix_tokens, dtype=torch.long, device=device).unsqueeze(0)
     abs_pos_prefix = torch.arange(prefix_len, dtype=torch.long)
@@ -158,32 +141,33 @@ def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, de
     _, _, word_logits0 = model(ids_prefix, R_prefix, None)
     log_prob_word0 = F.log_softmax(word_logits0[0, prefix_len - 1, :], dim=-1)
 
-    token_order = sorted(set(target_tokens), key=lambda tok: -log_prob_word0[tok].item())
-    step0 = []
-    for tok in token_order:
-        positions = [i for i in range(target_len) if target_tokens[i] == tok]
-        needed = beam_size - len(step0)
-        step0.extend(random.sample(positions, min(needed, len(positions))))
-        if len(step0) >= beam_size:
-            break
-
     beams = []
-    for i in step0:
-        R_i = _extend_R(R_prefix_2d, abs_pos_prefix, prefix_len + i)
-        abs_pos_i = torch.cat([abs_pos_prefix, torch.tensor([prefix_len + i])])
+    for _ in range(beam_size):
+        step0_perm = sorted(random.sample(range(target_len), n_init))
+        R = build_full_R_matrix(prefix_len, n_init, step0_perm)
+        abs_pos = torch.cat([
+            abs_pos_prefix,
+            prefix_len + torch.tensor(step0_perm, dtype=torch.long),
+        ])
+
+        # For simplicity, we ignore the position log probs in the initial score, it makes little difference
+        initial_score = sum(log_prob_word0[target_tokens[idx]].item() for idx in step0_perm)
+        
+        eos_step = (n_init - 1) if target_tokens[step0_perm[-1]] == eos_id else None
+        
         beams.append({
-            "perm": [i], # Permutation of the target tokens
-            "sorted_placed": [i], # Sorted list of placed tokens
-            "gen_idx_map": {i: 0}, # Mapping from target token index to generation index
-            "remaining": set(range(target_len)) - {i}, # Remaining target tokens
-            "score": log_prob_word0[target_tokens[i]].item(), # Score of the beam
-            "eos_step": 0 if target_tokens[i] == eos_id else None, # At which step EOS was placed (None if not placed yet)
-            "R": R_i,       # R matrix of size (prefix_len + t, prefix_len + t)
-            "abs_pos": abs_pos_i,  # absolute positions of all tokens so far
+            "perm": step0_perm, # Permutation of the target tokens
+            "sorted_placed": step0_perm, # Sorted list of placed tokens
+            "gen_idx_map": {idx: k for k, idx in enumerate(step0_perm)}, # Mapping from target token index to generation index
+            "remaining": set(range(target_len)) - set(step0_perm), # Remaining target tokens
+            "score": initial_score, # Score of the beam
+            "eos_step": eos_step, # At which step EOS was placed (None if not placed yet)
+            "R": R,       # R matrix of size (prefix_len + n_init, prefix_len + n_init)
+            "abs_pos": abs_pos,  # absolute positions of all tokens so far
         })
 
-    # --- Steps 1 to target_len - 1
-    for t in range(1, target_len):
+    # --- Steps n_init to target_len - 1
+    for t in range(n_init, target_len):
         n_beams = len(beams)
         seq_len = prefix_len + t
 
