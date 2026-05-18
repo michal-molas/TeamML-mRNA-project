@@ -110,6 +110,19 @@ def make_generation_perm(target_len, gen_order):
     return perm
 
 
+def _extend_R(R_prev, abs_pos_prev, new_abs_pos_val):
+    """Extend an (n, n) R matrix to (n+1, n+1) by appending one token.
+
+    new_abs_pos_val: int, absolute position of the new token
+    abs_pos_prev: LongTensor of shape (n,)
+    """
+    new_col = torch.sign(new_abs_pos_val - abs_pos_prev)  # R[:, new] = sign(pos_new - pos_i)
+    new_row = -new_col                                    # R[new, :] = sign(pos_i - pos_new)
+    R_new = torch.cat([R_prev, new_col.unsqueeze(1)], dim=1)
+    new_row_full = torch.cat([new_row, torch.zeros(1, dtype=torch.long)])
+    return torch.cat([R_new, new_row_full.unsqueeze(0)], dim=0)
+
+
 @torch.no_grad()
 def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, device):
     """
@@ -139,7 +152,9 @@ def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, de
     # we randomly sample the positions among the most likely tokens.
     
     ids_prefix = torch.tensor(prefix_tokens, dtype=torch.long, device=device).unsqueeze(0)
-    R_prefix = build_full_R_matrix(prefix_len, 0, []).unsqueeze(0).to(device)
+    abs_pos_prefix = torch.arange(prefix_len, dtype=torch.long)
+    R_prefix_2d = build_full_R_matrix(prefix_len, 0, [])
+    R_prefix = R_prefix_2d.unsqueeze(0).to(device)
     _, _, word_logits0 = model(ids_prefix, R_prefix, None)
     log_prob_word0 = F.log_softmax(word_logits0[0, prefix_len - 1, :], dim=-1)
 
@@ -154,6 +169,8 @@ def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, de
 
     beams = []
     for i in step0:
+        R_i = _extend_R(R_prefix_2d, abs_pos_prefix, prefix_len + i)
+        abs_pos_i = torch.cat([abs_pos_prefix, torch.tensor([prefix_len + i])])
         beams.append({
             "perm": [i], # Permutation of the target tokens
             "sorted_placed": [i], # Sorted list of placed tokens
@@ -161,19 +178,21 @@ def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, de
             "remaining": set(range(target_len)) - {i}, # Remaining target tokens
             "score": log_prob_word0[target_tokens[i]].item(), # Score of the beam
             "eos_step": 0 if target_tokens[i] == eos_id else None, # At which step EOS was placed (None if not placed yet)
+            "R": R_i,       # R matrix of size (prefix_len + t, prefix_len + t)
+            "abs_pos": abs_pos_i,  # absolute positions of all tokens so far
         })
 
     # --- Steps 1 to target_len - 1
     for t in range(1, target_len):
+        n_beams = len(beams)
         seq_len = prefix_len + t
 
         # Run model on all beams batched (get hidden states and word log-probs)
         ids_batch = torch.zeros(n_beams, seq_len, dtype=torch.long, device=device)
-        R_batch = torch.zeros(n_beams, seq_len, seq_len, dtype=torch.long, device=device)
+        R_batch = torch.stack([beam["R"] for beam in beams]).to(device)
         for b_idx, beam in enumerate(beams):
             tokens = prefix_tokens + [target_tokens[p] for p in beam["perm"]]
             ids_batch[b_idx] = torch.tensor(tokens, dtype=torch.long, device=device)
-            R_batch[b_idx] = build_full_R_matrix(prefix_len, t, beam["perm"]).to(device)
 
         H_batch, _, word_logits_batch = model(ids_batch, R_batch, None)
         h = H_batch[:, prefix_len + t - 1, :] # (n_beams, d_model)
@@ -242,6 +261,8 @@ def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, de
             if eos_step is None and target_tokens[token_idx] == eos_id:
                 eos_step = t
 
+            new_R = _extend_R(beam["R"], beam["abs_pos"], prefix_len + token_idx)
+            new_abs_pos = torch.cat([beam["abs_pos"], torch.tensor([prefix_len + token_idx])])
             new_beams.append({
                 "perm": beam["perm"] + [token_idx],
                 "sorted_placed": new_sorted,
@@ -249,6 +270,8 @@ def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, de
                 "remaining": beam["remaining"] - {token_idx},
                 "score": score,
                 "eos_step": eos_step,
+                "R": new_R,
+                "abs_pos": new_abs_pos,
             })
 
         beams = new_beams
