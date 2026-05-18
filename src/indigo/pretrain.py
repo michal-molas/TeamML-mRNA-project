@@ -124,169 +124,215 @@ def _extend_R(R_prev, abs_pos_prev, new_abs_pos_val):
 
 
 @torch.no_grad()
-def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, device, n_init=10):
-    target_len = len(target_tokens)
-    prefix_len = len(prefix_tokens)
+def beam_search_perms(model, batch_prefix_tokens, batch_target_tokens, eos_id, beam_size, device, n_init=10):
+    N = len(batch_prefix_tokens)
+    prefix_lens = [len(p) for p in batch_prefix_tokens]
+    target_lens = [len(t) for t in batch_target_tokens]
     W = model.get_embedding_matrix()  # (vocab_size, d_model)
-    n_init = min(n_init, target_len)
+    n_init = min(n_init, min(target_lens))
 
     # --------- Step 0 ---------
     # Since we only have 4 nucleotide types, we cannot really determine what are the best first tokens to generate.
     # So instead we will sample n_init starting positions and use them as initial permutation (sorted).
-    
-    ids_prefix = torch.tensor(prefix_tokens, dtype=torch.long, device=device).unsqueeze(0)
-    abs_pos_prefix = torch.arange(prefix_len, dtype=torch.long)
-    R_prefix_2d = build_full_R_matrix(prefix_len, 0, [])
-    R_prefix = R_prefix_2d.unsqueeze(0).to(device)
-    _, _, word_logits0 = model(ids_prefix, R_prefix, None)
-    log_prob_word0 = F.log_softmax(word_logits0[0, prefix_len - 1, :], dim=-1)
 
+    # beams[sample_idx] = list of beam dicts for sample sample_idx
     beams = []
-    for _ in range(beam_size):
-        step0_perm = sorted(random.sample(range(target_len), n_init))
-        R = build_full_R_matrix(prefix_len, n_init, step0_perm)
-        abs_pos = torch.cat([
-            abs_pos_prefix,
-            prefix_len + torch.tensor(step0_perm, dtype=torch.long),
-        ])
+    for sample_idx in range(N):
+        prefix_len = prefix_lens[sample_idx]
+        target_tokens = batch_target_tokens[sample_idx]
+        target_len = target_lens[sample_idx]
+        abs_pos_prefix = torch.arange(prefix_len, dtype=torch.long)
 
-        # For simplicity, we ignore the position log probs in the initial score, it makes little difference
-        initial_score = sum(log_prob_word0[target_tokens[idx]].item() for idx in step0_perm)
-        
-        eos_step = (n_init - 1) if target_tokens[step0_perm[-1]] == eos_id else None
-        
-        beams.append({
-            "perm": step0_perm, # Permutation of the target tokens
-            "sorted_placed": step0_perm, # Sorted list of placed tokens
-            "gen_idx_map": {idx: k for k, idx in enumerate(step0_perm)}, # Mapping from target token index to generation index
-            "remaining": set(range(target_len)) - set(step0_perm), # Remaining target tokens
-            "score": initial_score, # Score of the beam
-            "eos_step": eos_step, # At which step EOS was placed (None if not placed yet)
-            "R": R,       # R matrix of size (prefix_len + n_init, prefix_len + n_init)
-            "abs_pos": abs_pos,  # absolute positions of all tokens so far
-        })
+        sample_beams = []
+        for _ in range(beam_size):
+            step0_perm = sorted(random.sample(range(target_len), n_init))
+            R = build_full_R_matrix(prefix_len, n_init, step0_perm)
+            abs_pos = torch.cat([
+                abs_pos_prefix,
+                prefix_len + torch.tensor(step0_perm, dtype=torch.long),
+            ])
 
-    # --- Steps n_init to target_len - 1
-    for t in range(n_init, target_len):
-        n_beams = len(beams)
-        seq_len = prefix_len + t
+            # For simplicity, we completely ignore the initial score. This shouldn't be fine, as the initial tokens are random.
+            initial_score = 0.0
 
-        # Run model on all beams batched (get hidden states and word log-probs)
-        ids_batch = torch.zeros(n_beams, seq_len, dtype=torch.long, device=device)
-        R_batch = torch.stack([beam["R"] for beam in beams]).to(device)
-        for b_idx, beam in enumerate(beams):
-            tokens = prefix_tokens + [target_tokens[p] for p in beam["perm"]]
-            ids_batch[b_idx] = torch.tensor(tokens, dtype=torch.long, device=device)
+            eos_step = (n_init - 1) if target_tokens[step0_perm[-1]] == eos_id else None
 
-        H_batch, _, word_logits_batch = model(ids_batch, R_batch, None)
-        h = H_batch[:, prefix_len + t - 1, :] # (n_beams, d_model)
-        log_prob_word = F.log_softmax(word_logits_batch[:, prefix_len + t - 1, :], dim=-1) # (n_beams, vocab)
-
-        # Position keys from all t placed tokens (n_beams, 2t, d_model)
-        H_gen = H_batch[:, prefix_len:prefix_len + t, :]
-        left_keys  = model.position_head_left_proj(H_gen)
-        right_keys = model.position_head_right_proj(H_gen)
-        keys  = torch.cat([left_keys, right_keys], dim=1)   # (n_beams, 2t, d_model)
-        state = model.position_head_state_proj(h)            # (n_beams, d_model)
-
-        # Base validity mask: before BOS is always invalid
-        pos_valid_base = torch.ones(2 * t, dtype=torch.bool, device=device)
-        pos_valid_base[0] = False
-
-        all_candidates = []  # (combined_score, b_idx, token_idx)
-
-        for b_idx, beam in enumerate(beams):
-            # Update validity mask: Cannot place after EOS token
-            eos_col = (t + beam["eos_step"]) if beam["eos_step"] is not None else -1
-            pos_valid = pos_valid_base.clone()
-            if 0 <= eos_col < 2 * t:
-                pos_valid[eos_col] = False
-
-            remaining_list = list(beam["remaining"])
-            tokens_rem = torch.tensor(
-                [target_tokens[i] for i in remaining_list],
-                dtype=torch.long, device=device
-            )  # (n_rem,)
-
-            # Word scores for all remaining tokens
-            word_scores = log_prob_word[b_idx, tokens_rem]  # (n_rem,)
-
-            # Insertion position for each remaining token given current sorted order
-            sorted_placed_tensor = torch.tensor(
-                beam["sorted_placed"], dtype=torch.long, device=device
-            )  # (t,)
-
-            gen_steps = torch.tensor(
-                [beam["gen_idx_map"][sp] for sp in beam["sorted_placed"]],
-                dtype=torch.long, device=device
-            )  # (t,)
-
-            remaining_t = torch.tensor(
-                remaining_list, dtype=torch.long, device=device
-            )  # (n_rem,)
-
-            # pos_after_insert: number of sorted_placed entries strictly less than each remaining token
-            pos_after_insert = (
-                sorted_placed_tensor.unsqueeze(0) < remaining_t.unsqueeze(1)
-            ).sum(dim=1)  # (n_rem,)
-
-            predecessor_idx = torch.clamp(pos_after_insert - 1, min=0)  # (n_rem,)
-
-            # Left of first token: gen_steps[0]; Right of predecessor: t + gen_steps[predecessor_idx]
-            insertion_slots = torch.where(
-                pos_after_insert == 0, gen_steps[0], t + gen_steps[predecessor_idx]
-            )  # (n_rem,)
-
-            # Position score (consistent with training loss)
-            queries = state[b_idx].unsqueeze(0) + W[tokens_rem] # (n_rem, d_model)
-            pos_logits = queries @ keys[b_idx].T # (n_rem, 2t)
-            pos_logits = pos_logits.masked_fill(~pos_valid.unsqueeze(0), float("-inf"))
-            log_p_pos = F.log_softmax(pos_logits, dim=-1) # (n_rem, 2t)
-            pos_scores = log_p_pos[torch.arange(len(remaining_list), device=device), insertion_slots]
-            pos_scores = torch.where(
-                pos_valid[insertion_slots],
-                pos_scores,
-                torch.zeros_like(pos_scores)
-            )  # 0.0 if slot invalid
-
-            combined = beam["score"] + word_scores + pos_scores # (n_rem,)
-            for k, token_idx in enumerate(remaining_list):
-                all_candidates.append((combined[k].item(), b_idx, token_idx))
-
-        # Update beams with new best candidates
-        all_candidates.sort(key=lambda x: -x[0])
-        top = all_candidates[:beam_size]
-
-        new_beams = []
-        for score, b_idx, token_idx in top:
-            beam = beams[b_idx]
-            new_sorted = beam["sorted_placed"].copy()
-            ins = bisect.bisect_left(new_sorted, token_idx)
-            new_sorted.insert(ins, token_idx)
-
-            new_gen_idx_map = dict(beam["gen_idx_map"])
-            new_gen_idx_map[token_idx] = t
-
-            eos_step = beam["eos_step"]
-            if eos_step is None and target_tokens[token_idx] == eos_id:
-                eos_step = t
-
-            new_R = _extend_R(beam["R"], beam["abs_pos"], prefix_len + token_idx)
-            new_abs_pos = torch.cat([beam["abs_pos"], torch.tensor([prefix_len + token_idx])])
-            new_beams.append({
-                "perm": beam["perm"] + [token_idx],
-                "sorted_placed": new_sorted,
-                "gen_idx_map": new_gen_idx_map,
-                "remaining": beam["remaining"] - {token_idx},
-                "score": score,
-                "eos_step": eos_step,
-                "R": new_R,
-                "abs_pos": new_abs_pos,
+            sample_beams.append({
+                "perm": step0_perm, # Permutation of the target tokens
+                "sorted_placed": step0_perm, # Sorted list of placed tokens
+                "gen_idx_map": {idx: k for k, idx in enumerate(step0_perm)}, # Mapping from target token index to generation index
+                "remaining": set(range(target_len)) - set(step0_perm), # Remaining target tokens
+                "score": initial_score, # Score of the beam
+                "eos_step": eos_step, # At which step EOS was placed (None if not placed yet)
+                "R": R, # R matrix of size (prefix_len + n_init, prefix_len + n_init)
+                "abs_pos": abs_pos, # absolute positions of all tokens so far
             })
+        beams.append(sample_beams)
 
-        beams = new_beams
+    # --- Steps n_init to max_target_len - 1
+    for t in range(n_init, max(target_lens)):
+        # Flatten all active beams across all samples into one batch
+        all_beams = []  # list of (sample_idx, beam_dict)
+        for sample_idx in range(N):
+            if target_lens[sample_idx] <= t:
+                continue
+            for beam in beams[sample_idx]:
+                all_beams.append((sample_idx, beam))
 
-    return [beam["perm"] for beam in beams]
+        if len(all_beams) == 0: # This can only happen if all target_lens <= t
+            break
+
+        n_all_beams = len(all_beams)
+        max_seq_len  = max(prefix_lens[sample_idx] + t for sample_idx, _ in all_beams)
+
+        # Run model on all beams batched
+        ids_batch = torch.zeros(n_all_beams, max_seq_len, dtype=torch.long, device=device)
+        R_batch = torch.zeros(n_all_beams, max_seq_len, max_seq_len, dtype=torch.long, device=device)
+        padding_mask_batch = torch.ones(n_all_beams, max_seq_len, dtype=torch.bool, device=device)
+        for beam_idx, (sample_idx, beam) in enumerate(all_beams):
+            prefix_len = prefix_lens[sample_idx]
+            seq_len = prefix_len + t
+            tokens = batch_prefix_tokens[sample_idx] + [batch_target_tokens[sample_idx][p] for p in beam["perm"]]
+            ids_batch[beam_idx, :seq_len]       = torch.tensor(tokens, dtype=torch.long, device=device)
+            R_batch[beam_idx, :seq_len, :seq_len] = beam["R"].to(device)
+            padding_mask_batch[beam_idx, :seq_len] = False
+
+        H_batch_full, _, word_logits_full = model(ids_batch, R_batch, padding_mask_batch)
+
+        # Distribute results and score candidates per sample
+        
+        # Initialize new_beams_all with None for samples that need processing
+        # Keep finished samples as they are.
+        new_beams_all = [
+            beams[sample_idx] if target_lens[sample_idx] <= t else None 
+            for sample_idx in range(N)
+        ]
+        sample_offset = 0  # running index into the flattened batch
+
+        for sample_idx in range(N):
+            if target_lens[sample_idx] <= t:
+                continue
+
+            prefix_len = prefix_lens[sample_idx]
+            target_tokens = batch_target_tokens[sample_idx]
+            sample_beams = beams[sample_idx]
+            n_beams = len(sample_beams)
+
+            # Slice this sample's rows from the combined forward-pass output
+            H_batch = H_batch_full[sample_offset:sample_offset + n_beams]
+            word_logits_batch = word_logits_full[sample_offset:sample_offset + n_beams]
+            sample_offset += n_beams
+
+            h = H_batch[:, prefix_len + t - 1, :] # (n_beams, d_model)
+            log_prob_word = F.log_softmax(word_logits_batch[:, prefix_len + t - 1, :], dim=-1) # (n_beams, vocab)
+
+            # Position keys from all t placed tokens (n_beams, 2t, d_model)
+            H_gen = H_batch[:, prefix_len:prefix_len + t, :]
+            left_keys  = model.position_head_left_proj(H_gen)
+            right_keys = model.position_head_right_proj(H_gen)
+            keys  = torch.cat([left_keys, right_keys], dim=1) # (n_beams, 2t, d_model)
+            state = model.position_head_state_proj(h) # (n_beams, d_model)
+
+            # Base validity mask: before BOS is always invalid
+            pos_valid_base = torch.ones(2 * t, dtype=torch.bool, device=device)
+            pos_valid_base[0] = False
+
+            all_candidates = []  # (combined_score, b_idx, token_idx)
+
+            for b_idx, beam in enumerate(sample_beams):
+                # Update validity mask: Cannot place after EOS token
+                eos_col = (t + beam["eos_step"]) if beam["eos_step"] is not None else -1
+                pos_valid = pos_valid_base.clone()
+                if 0 <= eos_col < 2 * t:
+                    pos_valid[eos_col] = False
+
+                remaining_list = list(beam["remaining"])
+                tokens_rem = torch.tensor(
+                    [target_tokens[i] for i in remaining_list],
+                    dtype=torch.long, device=device
+                )  # (n_rem,)
+
+                # Word scores for all remaining tokens
+                word_scores = log_prob_word[b_idx, tokens_rem]  # (n_rem,)
+
+                # Insertion position for each remaining token given current sorted order
+                sorted_placed_tensor = torch.tensor(
+                    beam["sorted_placed"], dtype=torch.long, device=device
+                )  # (t,)
+
+                gen_steps = torch.tensor(
+                    [beam["gen_idx_map"][sp] for sp in beam["sorted_placed"]],
+                    dtype=torch.long, device=device
+                )  # (t,)
+
+                remaining_t = torch.tensor(
+                    remaining_list, dtype=torch.long, device=device
+                )  # (n_rem,)
+
+                # pos_after_insert: number of sorted_placed entries strictly less than each remaining token
+                pos_after_insert = (
+                    sorted_placed_tensor.unsqueeze(0) < remaining_t.unsqueeze(1)
+                ).sum(dim=1)  # (n_rem,)
+
+                predecessor_idx = torch.clamp(pos_after_insert - 1, min=0)  # (n_rem,)
+
+                # Left of first token: gen_steps[0]; Right of predecessor: t + gen_steps[predecessor_idx]
+                insertion_slots = torch.where(
+                    pos_after_insert == 0, gen_steps[0], t + gen_steps[predecessor_idx]
+                )  # (n_rem,)
+
+                # Position score (consistent with training loss)
+                queries = state[b_idx].unsqueeze(0) + W[tokens_rem] # (n_rem, d_model)
+                pos_logits = queries @ keys[b_idx].T # (n_rem, 2t)
+                pos_logits = pos_logits.masked_fill(~pos_valid.unsqueeze(0), float("-inf"))
+                log_p_pos = F.log_softmax(pos_logits, dim=-1) # (n_rem, 2t)
+                pos_scores = log_p_pos[torch.arange(len(remaining_list), device=device), insertion_slots]
+                pos_scores = torch.where(
+                    pos_valid[insertion_slots],
+                    pos_scores,
+                    torch.zeros_like(pos_scores)
+                )  # 0.0 if slot invalid
+
+                combined = beam["score"] + word_scores + pos_scores # (n_rem,)
+                for k, token_idx in enumerate(remaining_list):
+                    all_candidates.append((combined[k].item(), b_idx, token_idx))
+
+            # Update beams with new best candidates
+            all_candidates.sort(key=lambda x: -x[0])
+            top = all_candidates[:beam_size]
+
+            new_beams = []
+            for score, b_idx, token_idx in top:
+                beam = sample_beams[b_idx]
+                new_sorted = beam["sorted_placed"].copy()
+                ins = bisect.bisect_left(new_sorted, token_idx)
+                new_sorted.insert(ins, token_idx)
+
+                new_gen_idx_map = dict(beam["gen_idx_map"])
+                new_gen_idx_map[token_idx] = t
+
+                eos_step = beam["eos_step"]
+                if eos_step is None and target_tokens[token_idx] == eos_id:
+                    eos_step = t
+
+                new_R = _extend_R(beam["R"], beam["abs_pos"], prefix_len + token_idx)
+                new_abs_pos = torch.cat([beam["abs_pos"], torch.tensor([prefix_len + token_idx])])
+                new_beams.append({
+                    "perm": beam["perm"] + [token_idx],
+                    "sorted_placed": new_sorted,
+                    "gen_idx_map": new_gen_idx_map,
+                    "remaining": beam["remaining"] - {token_idx},
+                    "score": score,
+                    "eos_step": eos_step,
+                    "R": new_R,
+                    "abs_pos": new_abs_pos,
+                })
+
+            new_beams_all[sample_idx] = new_beams
+
+        beams = new_beams_all
+
+    return [[beam["perm"] for beam in beams[sample_idx]] for sample_idx in range(N)]
 
 
 def build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order="random", perm=None):
@@ -350,18 +396,30 @@ def collate_indigo_batch(samples, pad_id, eos_id, gen_order="random",
     Returns a dict of batched tensors, or None if all samples were skipped.
     """
     batch_tensors = []
-    for sample in samples:
-        prefix_tokens, target_tokens = extract_prefix_and_target(sample, pad_id)
-        if len(target_tokens) < 2:
-            continue
-        if gen_order == "sao":
-            perms = beam_search_perms(model, prefix_tokens, target_tokens,
-                                      eos_id, sao_beam_size, device)
+    if gen_order == "sao":
+        samples_with_targets = []
+        for sample in samples:
+            prefix_tokens, target_tokens = extract_prefix_and_target(sample, pad_id)
+            if len(target_tokens) >= 2:
+                samples_with_targets.append((prefix_tokens, target_tokens))
+        if not samples_with_targets:
+            return None
+        all_perms = beam_search_perms(
+            model,
+            [p for p, _ in samples_with_targets],
+            [t for _, t in samples_with_targets],
+            eos_id, sao_beam_size, device,
+        )
+        for (prefix_tokens, target_tokens), perms in zip(samples_with_targets, all_perms):
             for p in perms:
                 batch_tensors.append(
                     build_training_tensors(prefix_tokens, target_tokens, eos_id, perm=p)
                 )
-        else:
+    else:
+        for sample in samples:
+            prefix_tokens, target_tokens = extract_prefix_and_target(sample, pad_id)
+            if len(target_tokens) < 2:
+                continue
             tensors = build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order)
             batch_tensors.append(tensors)
 
