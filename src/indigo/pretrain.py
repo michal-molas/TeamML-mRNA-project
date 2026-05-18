@@ -55,8 +55,6 @@ def compute_position_targets(perm):
 
         if insert_idx == 0:
             p_indigo = gen_idx_map[sorted_placed[0]]
-        elif insert_idx == len(sorted_placed):
-            p_indigo = i + gen_idx_map[sorted_placed[-1]]
         else:
             p_indigo = i + gen_idx_map[sorted_placed[insert_idx - 1]]
 
@@ -112,7 +110,153 @@ def make_generation_perm(target_len, gen_order):
     return perm
 
 
-def build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order="random"):
+@torch.no_grad()
+def beam_search_perms(model, prefix_tokens, target_tokens, eos_id, beam_size, device):
+    """
+    
+
+    
+    Find the top-beam_size generation permutations via beam search over permutation space.
+
+    At each step the beam is expanded by scoring every remaining token (and its
+    uniquely-determined INDIGO insertion position) for every active beam.  The
+    global top-beam_size candidates are kept.  Runs entirely under no_grad; the
+    model should be in eval() mode before calling this function.
+
+    Returns a list of beam_size permutations (each a list of target_len absolute
+    target indices).  May return fewer than beam_size perms when target_len is
+    smaller than beam_size.
+    """
+    target_len = len(target_tokens)
+    prefix_len = len(prefix_tokens)
+    W = model.get_embedding_matrix()  # (vocab_size, d_model)
+
+    # --------- Step 0 ---------
+    # Since the only meaningful thing at the beginning are the token probabilities,
+    # we have to pick the starting token based on this.
+    # Since there are only 4 nucleotides, this will likely cause the beams to start with the same token.
+    # In order to diversify the beams, e.g. not pick all positions from the beggining of the target,
+    # we randomly sample the positions among the most likely tokens.
+    
+    ids_prefix = torch.tensor(prefix_tokens, dtype=torch.long, device=device).unsqueeze(0)
+    R_prefix = build_full_R_matrix(prefix_len, 0, []).unsqueeze(0).to(device)
+    _, _, word_logits0 = model(ids_prefix, R_prefix, None)
+    log_prob_word0 = F.log_softmax(word_logits0[0, prefix_len - 1, :], dim=-1)
+
+    token_order = sorted(set(target_tokens), key=lambda tok: -log_prob_word0[tok].item())
+    step0 = []
+    for tok in token_order:
+        positions = [i for i in range(target_len) if target_tokens[i] == tok]
+        needed = beam_size - len(step0)
+        step0.extend(random.sample(positions, min(needed, len(positions))))
+        if len(step0) >= beam_size:
+            break
+
+    beams = []
+    for i in step0:
+        beams.append({
+            "perm": [i], # Permutation of the target tokens
+            "sorted_placed": [i], # Sorted list of placed tokens
+            "gen_idx_map": {i: 0}, # Mapping from target token index to generation index
+            "remaining": set(range(target_len)) - {i}, # Remaining target tokens
+            "score": log_prob_word0[target_tokens[i]].item(), # Score of the beam
+            "eos_step": 0 if target_tokens[i] == eos_id else None, # At which step EOS was placed (None if not placed yet)
+        })
+
+    # --- Steps 1 to target_len - 1
+    for t in range(1, target_len):
+        seq_len = prefix_len + t
+
+        # Run model on all beams batched (get hidden states and word log-probs)
+        ids_batch = torch.zeros(n_beams, seq_len, dtype=torch.long, device=device)
+        R_batch = torch.zeros(n_beams, seq_len, seq_len, dtype=torch.long, device=device)
+        for b_idx, beam in enumerate(beams):
+            tokens = prefix_tokens + [target_tokens[p] for p in beam["perm"]]
+            ids_batch[b_idx] = torch.tensor(tokens, dtype=torch.long, device=device)
+            R_batch[b_idx] = build_full_R_matrix(prefix_len, t, beam["perm"]).to(device)
+
+        H_batch, _, word_logits_batch = model(ids_batch, R_batch, None)
+        h = H_batch[:, prefix_len + t - 1, :] # (n_beams, d_model)
+        log_prob_word = F.log_softmax(word_logits_batch[:, prefix_len + t - 1, :], dim=-1) # (n_beams, vocab)
+
+        # Position keys from all t placed tokens (n_beams, 2t, d_model)
+        H_gen = H_batch[:, prefix_len:prefix_len + t, :]
+        left_keys  = model.position_head_left_proj(H_gen)
+        right_keys = model.position_head_right_proj(H_gen)
+        keys  = torch.cat([left_keys, right_keys], dim=1)   # (n_beams, 2t, d_model)
+        state = model.position_head_state_proj(h)            # (n_beams, d_model)
+
+        # Base validity mask: before BOS is always invalid
+        pos_valid_base = torch.ones(2 * t, dtype=torch.bool, device=device)
+        pos_valid_base[0] = False
+
+        all_candidates = []  # (combined_score, b_idx, token_idx)
+
+        for b_idx, beam in enumerate(beams):
+            # Update validity mask: Cannot place after EOS token
+            eos_col = (t + beam["eos_step"]) if beam["eos_step"] is not None else -1
+            pos_valid = pos_valid_base.clone()
+            if 0 <= eos_col < 2 * t:
+                pos_valid[eos_col] = False
+            
+            for token_idx in beam["remaining"]:
+                token = target_tokens[token_idx]
+                word_score = log_prob_word[b_idx, token].item()
+
+                # Insertion position for token_idx given current sorted order
+                pos_after_insert = bisect.bisect_left(beam["sorted_placed"], token_idx)
+                if pos_after_insert == 0:
+                    # Left of first token
+                    insertion_slot = beam["gen_idx_map"][beam["sorted_placed"][0]]
+                else:
+                    # Right of (pos_after_insert - 1)th token
+                    insertion_slot = t + beam["gen_idx_map"][beam["sorted_placed"][pos_after_insert - 1]]
+
+                # Position score (consistent with training loss)
+                if not pos_valid[insertion_slot]:
+                    pos_score = 0.0
+                else:
+                    z_emb    = W[token]                                 # (d_model,)
+                    query    = state[b_idx] + z_emb                     # (d_model,)
+                    p_logits = query @ keys[b_idx].T                    # (2t,)
+                    p_logits = p_logits.masked_fill(~pos_valid, float("-inf"))
+                    pos_score = F.log_softmax(p_logits, dim=-1)[insertion_slot].item()
+
+                all_candidates.append((beam["score"] + word_score + pos_score, b_idx, token_idx))
+
+        # Update beams with new best candidates
+        all_candidates.sort(key=lambda x: -x[0])
+        top = all_candidates[:beam_size]
+
+        new_beams = []
+        for score, b_idx, token_idx in top:
+            beam = beams[b_idx]
+            new_sorted = beam["sorted_placed"].copy()
+            ins = bisect.bisect_left(new_sorted, token_idx)
+            new_sorted.insert(ins, token_idx)
+
+            new_gen_idx_map = dict(beam["gen_idx_map"])
+            new_gen_idx_map[token_idx] = t
+
+            eos_step = beam["eos_step"]
+            if eos_step is None and target_tokens[token_idx] == eos_id:
+                eos_step = t
+
+            new_beams.append({
+                "perm": beam["perm"] + [token_idx],
+                "sorted_placed": new_sorted,
+                "gen_idx_map": new_gen_idx_map,
+                "remaining": beam["remaining"] - {token_idx},
+                "score": score,
+                "eos_step": eos_step,
+            })
+
+        beams = new_beams
+
+    return [beam["perm"] for beam in beams]
+
+
+def build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order="random", perm=None):
     """Build permuted training tensors for one sample.
 
     Returns dict with:
@@ -123,10 +267,13 @@ def build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order="rand
       - eos_gen_idx: generation index of the EOS token (for position masking)
       - prefix_len: int
       - target_len: int
+
+    perm: if provided, used directly instead of sampling via gen_order.
     """
 
     target_len = len(target_tokens)
-    perm = make_generation_perm(target_len, gen_order)
+    if perm is None:
+        perm = make_generation_perm(target_len, gen_order)
 
     permuted_target = [target_tokens[perm[t]] for t in range(target_len)]
 
@@ -156,11 +303,16 @@ def build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order="rand
     }
 
 
-def collate_indigo_batch(samples, pad_id, eos_id, gen_order="random"):
+def collate_indigo_batch(samples, pad_id, eos_id, gen_order="random",
+                         model=None, device=None, sao_beam_size=4):
     """Collate a list of dataset samples into a padded batch for INDIGO training.
 
     Each sample is processed through extract_prefix_and_target + build_training_tensors,
     then padded to the maximum lengths in the batch.
+
+    For gen_order='sao', model and device must be supplied.  beam_search_perms is
+    called per sample; the resulting beam_size permutations are each built into
+    tensors and flattened into the batch (effective batch size *= sao_beam_size).
 
     Returns a dict of batched tensors, or None if all samples were skipped.
     """
@@ -169,8 +321,16 @@ def collate_indigo_batch(samples, pad_id, eos_id, gen_order="random"):
         prefix_tokens, target_tokens = extract_prefix_and_target(sample, pad_id)
         if len(target_tokens) < 2:
             continue
-        tensors = build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order)
-        batch_tensors.append(tensors)
+        if gen_order == "sao":
+            perms = beam_search_perms(model, prefix_tokens, target_tokens,
+                                      eos_id, sao_beam_size, device)
+            for p in perms:
+                batch_tensors.append(
+                    build_training_tensors(prefix_tokens, target_tokens, eos_id, perm=p)
+                )
+        else:
+            tensors = build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order)
+            batch_tensors.append(tensors)
 
     if len(batch_tensors) == 0:
         return None
@@ -362,7 +522,10 @@ def compute_validation_loss(args, model, val_dataset, pad_id, eos_id, batch_size
         for start in range(0, n_val, batch_size):
             end = min(start + batch_size, n_val)
             samples = [val_dataset[i] for i in range(start, end)]
-            batch = collate_indigo_batch(samples, pad_id, eos_id, args.gen_order)
+            batch = collate_indigo_batch(
+                samples, pad_id, eos_id, args.gen_order,
+                model=model, device=device, sao_beam_size=args.sao_beam_size,
+            )
             if batch is None:
                 continue
 
@@ -424,7 +587,15 @@ def train(args, device):
             end = min(start + batch_size, len(indices))
             samples = [train_dataset[indices[i]] for i in range(start, end)]
 
-            batch = collate_indigo_batch(samples, pad_id, eos_id, args.gen_order)
+            if args.gen_order == "sao":
+                model.eval()
+                batch = collate_indigo_batch(
+                    samples, pad_id, eos_id, args.gen_order,
+                    model=model, device=device, sao_beam_size=args.sao_beam_size,
+                )
+                model.train()
+            else:
+                batch = collate_indigo_batch(samples, pad_id, eos_id, args.gen_order)
             if batch is None:
                 continue
 
@@ -466,8 +637,10 @@ def main():
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--output_path", type=str, default=None)
     parser.add_argument("--gen_order", type=str, default="random",
-                        choices=["random", "l2r", "r2l", "inward"],
-                        help="Generation order: random | l2r | r2l | inward")
+                        choices=["random", "l2r", "r2l", "inward", "outward", "sao"],
+                        help="Generation order: random | l2r | r2l | inward | outward | sao")
+    parser.add_argument("--sao_beam_size", type=int, default=4,
+                        help="Beam size for SAO order search (only used when --gen_order sao)")
     parser.add_argument("--wandb", action="store_true")
     args = parser.parse_args()
 
