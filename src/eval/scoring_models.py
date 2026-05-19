@@ -7,9 +7,11 @@ import RNA
 try:
     from .eval import ScoringModel
     from .schemas import SAMPLE_INDEX_COLS
+    from .utrlm import UTRLMPredictor, normalize_tasks
 except ImportError:
     from eval import ScoringModel
     from schemas import SAMPLE_INDEX_COLS
+    from utrlm import UTRLMPredictor, normalize_tasks
 
 from transformer_training.ribonn_utils import (
     RIBONN_CONFIG,
@@ -124,12 +126,40 @@ class RNAfold(ScoringModel):
 
 
 class UTRLM(ScoringModel):
-    def __init__(self, score_name: str = "utrlm_score"):
+    def __init__(
+        self,
+        tasks: str | list[str] | tuple[str, ...] = ("mrl", "te", "el"),
+        cell_line: str = "HEK",
+        te_cell_line: str | None = None,
+        el_cell_line: str | None = None,
+        fold: int | None = None,
+        finetuned: bool = True,
+        device: str | torch.device | None = None,
+        trim_te_el_to_last_100: bool = True,
+    ):
         super().__init__()
-        self.score_name = score_name
+        self.tasks = normalize_tasks((tasks,) if isinstance(tasks, str) else tasks)
+        self.predictor = UTRLMPredictor(
+            device=device,
+            te_cell_line=te_cell_line or cell_line,
+            el_cell_line=el_cell_line or cell_line,
+            fold=fold,
+            finetuned=finetuned,
+            trim_te_el_to_last_100=trim_te_el_to_last_100,
+        )
 
     def score_row(self, row) -> dict[str, float]:
-        raise NotImplementedError("UTRLM scoring not implemented yet")
+        return self.predictor.predict_dict(
+            utr5=row.get("utr5", ""),
+            cds=row.get("cds", ""),
+            utr3=row.get("utr3", ""),
+            tasks=self.tasks,
+        )
+
+    def score(self, features: pd.DataFrame) -> pd.DataFrame:
+        samples = features.fillna("")
+        scores = self.predictor.predict_many(samples, tasks=self.tasks)
+        return pd.concat([samples[SAMPLE_INDEX_COLS], scores], axis=1)
 
 
 class Saluki(ScoringModel):

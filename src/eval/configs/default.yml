@@ -6,13 +6,13 @@ scoring_models:
   - type: RiboNN
     weights_path: RiboNN/models/human/a569cb3e25b24729aa634dfc0c58635c/state_dict.pth
     batch_size: 1
-
   # Use ensemble of RiboNN models
   # - type: RiboNN
   #   weights_folder: RiboNN/models/human
   #   top_k_models_to_use: 5
   #   batch_size: 32
   - type: RNAfold
+  - type: UTRLM
 
 aggregators:
   - type: SimpleAverage
