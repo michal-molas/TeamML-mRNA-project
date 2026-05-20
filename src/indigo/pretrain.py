@@ -1,11 +1,14 @@
 import argparse
 import bisect
+import os
 import random
 import sys
 
 import wandb
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import random_split
 from torch.optim import AdamW
 from tqdm import tqdm
@@ -229,7 +232,8 @@ def beam_search_perms(model, batch_prefix_tokens, batch_target_tokens, eos_id, b
     N = len(batch_prefix_tokens)
     prefix_lens = [len(p) for p in batch_prefix_tokens]
     target_lens = [len(t) for t in batch_target_tokens]
-    W = model.get_embedding_matrix()  # (vocab_size, d_model)
+    _model = model.module if hasattr(model, "module") else model
+    W = _model.get_embedding_matrix()  # (vocab_size, d_model)
     n_init = min(n_init, min(target_lens))
 
     # --------- Step 0 ---------
@@ -333,10 +337,10 @@ def beam_search_perms(model, batch_prefix_tokens, batch_target_tokens, eos_id, b
 
             # Position keys from all t placed tokens (n_beams, 2t, d_model)
             H_gen = H_batch[:, prefix_len:prefix_len + t, :]
-            left_keys  = model.position_head_left_proj(H_gen)
-            right_keys = model.position_head_right_proj(H_gen)
+            left_keys  = _model.position_head_left_proj(H_gen)
+            right_keys = _model.position_head_right_proj(H_gen)
             keys  = torch.cat([left_keys, right_keys], dim=1) # (n_beams, 2t, d_model)
-            state = model.position_head_state_proj(h) # (n_beams, d_model)
+            state = _model.position_head_state_proj(h) # (n_beams, d_model)
 
             # Base validity mask: before BOS is always invalid
             pos_valid_base = torch.ones(2 * t, dtype=torch.bool, device=device)
@@ -614,7 +618,8 @@ def compute_indigo_loss_batched(model, batch, device):
     pos_loss = torch.tensor(0.0, device=device)
 
     if max_pos_steps > 0:
-        W = model.get_embedding_matrix()
+        _model = model.module if hasattr(model, "module") else model
+        W = _model.get_embedding_matrix()
         T = max_pos_steps
 
         # Gather hidden states for all generated positions
@@ -622,9 +627,9 @@ def compute_indigo_loss_batched(model, batch, device):
         H_gen_all = H.gather(1, gen_all_pos.unsqueeze(-1).expand(-1, -1, d_model))
 
         # Projections for position prediction
-        H_left_all = model.position_head_left_proj(H_gen_all) # H^T * C
-        H_right_all = model.position_head_right_proj(H_gen_all) # H^T * D
-        H_state_all = model.position_head_state_proj(H_gen_all) # h_t^T * E
+        H_left_all = _model.position_head_left_proj(H_gen_all) # H^T * C
+        H_right_all = _model.position_head_right_proj(H_gen_all) # H^T * D
+        H_state_all = _model.position_head_state_proj(H_gen_all) # h_t^T * E
 
         # Query = state_proj(h) + embedding of token to insert
         z_emb_all = W[word_targets[:, 1 : T + 1].clamp(0, vocab_size - 1)] # W_[y_{t+1}]
@@ -703,16 +708,20 @@ def extract_prefix_and_target(sample, pad_id):
     return prefix_tokens, target_tokens
 
 
-def compute_validation_loss(args, model, val_dataset, pad_id, eos_id, batch_size, device):
+def compute_validation_loss(args, model, val_dataset, pad_id, eos_id, batch_size, device,
+                            rank=0, world_size=1, distributed=False):
     model.eval()
     val_loss = 0.0
     count = 0
     n_val = min(len(val_dataset), 200)
 
+    # Each rank evaluates a disjoint subset.
+    rank_indices = list(range(rank, n_val, world_size))
+
     with torch.no_grad():
-        for start in range(0, n_val, batch_size):
-            end = min(start + batch_size, n_val)
-            samples = [val_dataset[i] for i in range(start, end)]
+        for start in range(0, len(rank_indices), batch_size):
+            idx_slice = rank_indices[start : start + batch_size]
+            samples = [val_dataset[i] for i in idx_slice]
             batch = collate_indigo_batch(
                 samples, pad_id, eos_id, args.gen_order,
                 model=model, device=device, sao_beam_size=args.sao_beam_size,
@@ -725,13 +734,19 @@ def compute_validation_loss(args, model, val_dataset, pad_id, eos_id, batch_size
             val_loss += loss.item() * batch_actual
             count += batch_actual
 
+    if distributed:
+        t = torch.tensor([val_loss, float(count)], device=device)
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        val_loss, count = t[0].item(), t[1].item()
+
     if count > 0:
         val_loss /= count
-    print(f"Validation Loss: {val_loss:.4f}", file=sys.stderr)
+    if rank == 0:
+        print(f"Validation Loss: {val_loss:.4f}", file=sys.stderr)
     return val_loss
 
 
-def train(args, device):
+def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
     dataset = MRNACsvDataset(
         csv_path=args.csv_path,
         max_utr5_len=args.max_utr5_len,
@@ -757,6 +772,8 @@ def train(args, device):
     )
 
     model = IndigoTransformer(config).to(device)
+    if distributed:
+        model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
 
     pad_id = dataset.pad_id
@@ -769,8 +786,10 @@ def train(args, device):
         epoch_loss = 0.0
         n_batches = 0
         model.train()
-        indices = list(range(len(train_dataset)))
-        random.shuffle(indices)
+        all_indices = list(range(len(train_dataset)))
+        rng = random.Random(epoch)  # same shuffle on all ranks
+        rng.shuffle(all_indices)
+        indices = all_indices[rank::world_size]  # disjoint per-rank slice
 
         n_steps = (len(indices) + batch_size - 1) // batch_size
         for step in tqdm(range(n_steps)):
@@ -800,18 +819,22 @@ def train(args, device):
             n_batches += 1
             epoch_loss += loss.item()
 
-            if args.wandb and step % 100 == 0:
+            if args.wandb and step % 100 == 0 and rank == 0:
                 wandb.log({"train/loss": loss.item()}, step=global_step)
 
         epoch_loss /= max(n_batches, 1)
         print(f"Epoch {epoch} | loss={epoch_loss:.4f}")
 
-        if args.output_path and epoch_loss < best_loss:
+        if args.output_path and epoch_loss < best_loss and rank == 0:
             best_loss = epoch_loss
-            torch.save({"model_state_dict": model.state_dict()}, args.output_path)
+            state_dict = model.state_dict()
+            torch.save({"model_state_dict": state_dict}, args.output_path)
 
-        val_loss = compute_validation_loss(args, model, val_dataset, pad_id, eos_id, batch_size, device)
-        if args.wandb:
+        val_loss = compute_validation_loss(
+            args, model, val_dataset, pad_id, eos_id, batch_size, device,
+            rank=rank, world_size=world_size, distributed=distributed,
+        )
+        if args.wandb and rank == 0:
             wandb.log({"valid/loss": val_loss}, step=global_step)
 
 
@@ -838,20 +861,60 @@ def main():
     parser.add_argument("--wandb", action="store_true")
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     load_dotenv()
 
-    if args.wandb:
+    # --- Distributed init (SLURM + NCCL) ---
+    # Works with: srun --ntasks=N --gres=gpu:N (SLURM sets SLURM_PROCID etc.)
+    # Also works with torchrun (sets RANK/WORLD_SIZE directly).
+    distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
+    if not distributed and "SLURM_PROCID" in os.environ:
+        os.environ["RANK"]       = os.environ["SLURM_PROCID"]
+        os.environ["WORLD_SIZE"] = os.environ["SLURM_NTASKS"]
+        # SLURM sets CUDA_VISIBLE_DEVICES so each task sees its GPU as device 0.
+        # Using SLURM_LOCALID here would cause "invalid device ordinal" on tasks
+        # that are assigned a GPU other than the first one.
+        os.environ["LOCAL_RANK"] = "0"
+        if "MASTER_ADDR" not in os.environ:
+            import subprocess
+            try:
+                nodelist = os.environ.get("SLURM_NODELIST", "")
+                master = subprocess.check_output(
+                    ["scontrol", "show", "hostnames", nodelist],
+                    stderr=subprocess.DEVNULL,
+                ).decode().splitlines()[0].strip()
+            except Exception:
+                master = "127.0.0.1"
+            os.environ["MASTER_ADDR"] = master
+        if "MASTER_PORT" not in os.environ:
+            os.environ["MASTER_PORT"] = "29500"
+        distributed = True
+
+    if distributed:
+        rank       = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+    else:
+        rank       = 0
+        world_size = 1
+        device     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if args.wandb and rank == 0:
         wandb.init(
             project="indigo-pretrain",
             config=vars(args),
             dir='../../logs',
         )
 
-    train(args, device)
+    train(args, device, rank=rank, world_size=world_size, distributed=distributed, local_rank=local_rank)
 
-    if args.wandb:
+    if args.wandb and rank == 0:
         wandb.finish()
+
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
