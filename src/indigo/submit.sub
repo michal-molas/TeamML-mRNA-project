@@ -1,7 +1,8 @@
 #!/bin/bash -x
 #SBATCH --account=hai_1223  	 	     # Account details
-#SBATCH --cpus-per-task=48
-#SBATCH --gres=gpu:1                     # Use the 4 GPUs available
+#SBATCH --cpus-per-task=12
+#SBATCH --ntasks=4
+#SBATCH --gres=gpu:4                     # 4 GPUs, 1 per task
 #SBATCH --output=out/output.%j               # File for standard output
 #SBATCH --error=err/error.%j                 # File for standard error
 #SBATCH --time=00:05:00                  # Maximum runtime
@@ -14,4 +15,5 @@ export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
 source ../../venv_setup/activate.sh
 
 # run script 
-time srun python3 pretrain.py --wandb
+# time srun python3 pretrain.py --wandb --gen_order l2r
+time srun python3 pretrain.py --wandb --gen_order sao --sao_beam_size 4 --sao_tokens_per_step 10
