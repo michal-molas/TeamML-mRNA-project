@@ -122,7 +122,10 @@ class RNAfold(ScoringModel):
     def score_row(self, row) -> dict[str, float]:
         seq = row.get("utr5", "") + row.get("cds", "") + row.get("utr3", "")
         structure, mfe = RNA.fold(seq)
-        return {self.score_name: float(mfe)}
+        return {
+            "rnafold_mfe": float(mfe),
+            "rnafold_mfe_per_nt": float(mfe) / len(seq) if len(seq) > 0 else 0.0,
+        }
 
 
 class UTRLM(ScoringModel):
@@ -146,6 +149,7 @@ class UTRLM(ScoringModel):
             fold=fold,
             finetuned=finetuned,
             trim_te_el_to_last_100=trim_te_el_to_last_100,
+            batch_size=4,
         )
 
     def score_row(self, row) -> dict[str, float]:
@@ -156,9 +160,13 @@ class UTRLM(ScoringModel):
             tasks=self.tasks,
         )
 
-    def score(self, features: pd.DataFrame) -> pd.DataFrame:
+    def score(self, features: pd.DataFrame, progress_bar: bool = True) -> pd.DataFrame:
         samples = features.fillna("")
-        scores = self.predictor.predict_many(samples, tasks=self.tasks)
+        scores = self.predictor.predict_many(
+            samples,
+            tasks=self.tasks,
+            progress_bar=progress_bar,
+        )
         return pd.concat([samples[SAMPLE_INDEX_COLS], scores], axis=1)
 
 

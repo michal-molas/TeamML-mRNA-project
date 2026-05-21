@@ -18,20 +18,6 @@ class EvalConfig:
     plots: list[dict]
 
 
-class FeatureExtractor(ABC):
-    def __init__(self):
-        pass
-
-    @abstractmethod
-    def extract_row_features(self, row) -> dict[str, float]:
-        raise NotImplementedError()
-
-    def extract_features(self, samples: pd.DataFrame) -> pd.DataFrame:
-        index_cols = samples[SAMPLE_INDEX_COLS]
-        features = samples.apply(self.extract_row_features, axis=1, result_type="expand")
-        return pd.concat([index_cols, features], axis=1)
-
-
 class ScoringModel(ABC):
     def __init__(self):
         pass
@@ -50,6 +36,18 @@ class ScoringModel(ABC):
         scores = [self.score_row(row) for _, row in rows]
         scores_df = pd.DataFrame(scores).reset_index(drop=True)
         return pd.concat([index_cols, scores_df], axis=1)
+
+
+class GroupAggregator(ABC):
+    def __init__(self, name: str):
+        self.name = name
+
+    @abstractmethod
+    def aggregate(self, scores: pd.DataFrame, group: str) -> pd.DataFrame:
+        """
+        group should be 'cds' or 'global' -> whether to aggregate by CDS or globally
+        """
+        raise NotImplementedError()
 
 
 class Aggregator(ABC):

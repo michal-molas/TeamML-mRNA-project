@@ -1,23 +1,32 @@
 feature_extractors:
-  - type: StringStatistics
+  - string_statistics
+  - gc_content
 
 scoring_models:
   # Use single RiboNN model
-  - type: RiboNN
-    weights_path: RiboNN/models/human/a569cb3e25b24729aa634dfc0c58635c/state_dict.pth
-    batch_size: 1
+  # - type: RiboNN
+  #   weights_path: RiboNN/models/human/a569cb3e25b24729aa634dfc0c58635c/state_dict.pth
+  #   batch_size: 1
   # Use ensemble of RiboNN models
   # - type: RiboNN
   #   weights_folder: RiboNN/models/human
   #   top_k_models_to_use: 5
   #   batch_size: 32
-  - type: RNAfold
+  # - type: RNAfold
   - type: UTRLM
 
 aggregators:
   - type: SimpleAverage
 
 plots:
-  - type: feature_distribution
-    table: features
-    feature: cds_length
+  - type: gt_vs_generated_distribution
+    metrics:
+      - utr5_length_mean
+      - utr3_length_mean
+      - utr5_gc_content_mean
+      - utr3_gc_content_mean
+      # - ribonn_score_mean
+      # - rnafold_mfe_mean
+      - utrlm_mrl_mean
+      # - utrlm_te_mean
+      # - utrlm_el_mean

@@ -1,48 +1,32 @@
-from eval import FeatureExtractor
+try:
+    from .schemas import SAMPLE_INDEX_COLS
+except ImportError:
+    from schemas import SAMPLE_INDEX_COLS
 
 import pandas as pd
 
 
-class StringStatisticsExtractor(FeatureExtractor):
-    def __init__(self):
-        super().__init__()
+def string_statistics_extractor(samples: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame({
+        "id": samples["id"],
+        "sample": samples["sample"],
+        "cds_length": samples["cds"].apply(len),
+        "utr5_length": samples["utr5"].apply(len),
+        "utr3_length": samples["utr3"].apply(len),
+    })
 
-    def extract_row_features(self, row) -> dict[str, float]:
-        return {
-            "cds_length": len(row["cds"]),
-            "utr5_length": len(row["utr5"]),
-            "utr3_length": len(row["utr3"]),
-        }
 
-    def extract_features(self, samples: pd.DataFrame) -> pd.DataFrame:
-        # Implement logic to extract features from the samples
-        # This is a placeholder implementation, replace with actual feature extraction logic
+def gc_content(seq: str) -> float:
+    gc_count = seq.count("G") + seq.count("C")
+    total_count = len(seq)
+    return gc_count / total_count if total_count > 0 else 0.0
 
-        # Sanitize input
-        samples = samples.fillna("")
 
-        return pd.DataFrame({
-            "id": samples["id"],
-            "sample": samples["sample"],
-            "cds_length": samples["cds"].apply(len),
-            "utr5_length": samples["utr5"].apply(len),
-            "utr3_length": samples["utr3"].apply(len),
-        })
-
-    
-class GCContentExtractor(FeatureExtractor):
-    def __init__(self):
-        super().__init__()
-
-    @staticmethod
-    def gc_content(seq: str) -> float:
-        gc_count = seq.count("G") + seq.count("C")
-        total_count = len(seq)
-        return gc_count / total_count if total_count > 0 else 0.0
-
-    def extract_row_features(self, row) -> dict[str, float]:
-        return {
-            "utr5_gc_content": self.gc_content(row["utr5"]),
-            "cds_gc_content": self.gc_content(row["cds"]),
-            "utr3_gc_content": self.gc_content(row["utr3"]),
-        }
+def gc_content_extractor(samples: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame({
+        "id": samples["id"],
+        "sample": samples["sample"],
+        "cds_gc_content": samples["cds"].apply(gc_content),
+        "utr5_gc_content": samples["utr5"].apply(gc_content),
+        "utr3_gc_content": samples["utr3"].apply(gc_content),
+    })

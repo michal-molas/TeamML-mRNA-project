@@ -3,17 +3,18 @@ from dataclasses import dataclass
 import os
 from datetime import datetime
 from functools import reduce
-from typing import Iterable
+from typing import Iterable, Callable
 
 import pandas as pd
 import yaml
 import numpy as np
 
-from eval import FeatureExtractor, ScoringModel, Aggregator, EvalConfig
+from eval import ScoringModel, Aggregator, EvalConfig
 from schemas import SAMPLE_CSV_COLS, SAMPLE_INDEX_COLS
 
 from feature_extractors import (
-    StringStatisticsExtractor,
+    string_statistics_extractor,
+    gc_content_extractor,
 )
 from scoring_models import (
     RiboNN,
@@ -25,13 +26,15 @@ from aggregators import (
 )
 from plots import (
     feature_distribution,
+    gt_vs_generated_distribution,
 )
 
 
 EVAL_DIR = "data/evals"
 
-FEATURE_EXTRACTORS = {
-    "StringStatistics": StringStatisticsExtractor
+FEATURE_EXTRACTORS: dict[str, Callable] = {
+    "string_statistics": string_statistics_extractor,
+    "gc_content": gc_content_extractor,
 }
 
 SCORING_MODELS = {
@@ -45,7 +48,8 @@ AGGREGATORS = {
 }
 
 PLOTS = {
-    "feature_distribution": feature_distribution
+    "feature_distribution": feature_distribution,
+    "gt_vs_generated_distribution": gt_vs_generated_distribution,
 }
 
 
@@ -55,13 +59,6 @@ def load_scoring_model(config: dict) -> ScoringModel:
         raise ValueError(f"Unknown scoring model type: {config['type']}")
     kwargs = {key: value for key, value in config.items() if key != "type"}
     return scoring_model(**kwargs)
-
-
-def load_feature_extractor(config: dict) -> FeatureExtractor:
-    feature_extractor = FEATURE_EXTRACTORS.get(config["type"])
-    if feature_extractor is None:
-        raise ValueError(f"Unknown feature extractor type: {config['type']}")
-    return feature_extractor()
 
 
 def load_aggregator(config: dict) -> Aggregator:
@@ -160,9 +157,8 @@ def save_results(
                 print(f"Unknown plot type: {name}, skipping...")
                 continue
             print(f"Generating plot: {name}...")
-            save_path = f"{plot_dir}/{name}.png"
-            plot_func(eval_results, plot_config, save_path)
-            print(f"Saved plot {name} to {save_path}")
+            plot_func(eval_results, plot_config, plot_dir)
+            print(f"Saved plot {name} to {plot_dir}")
 
 
 def preprocess_samples_df(samples: pd.DataFrame) -> pd.DataFrame:
@@ -225,7 +221,7 @@ def calculate_global_metrics(scores: pd.DataFrame) -> pd.DataFrame:
 
 def run_evaluation(
     samples: pd.DataFrame,
-    feature_extractors: Iterable[FeatureExtractor],
+    feature_extractors: dict[str, Callable],
     scoring_models: Iterable[ScoringModel],
     # cds_aggregators: Iterable[Aggregator],
     # global_aggregators: Iterable[Aggregator],
@@ -238,9 +234,9 @@ def run_evaluation(
     feature_tables = {}
     scoring_model_tables = {}
 
-    for extractor in feature_extractors:
-        print(f"Extracting features using {extractor.__class__.__name__}...")
-        feature_tables[extractor.__class__.__name__] = extractor.extract_features(samples)
+    for extractor_name, extractor in feature_extractors.items():
+        print(f"Extracting features using {extractor_name}...")
+        feature_tables[extractor_name] = extractor(samples)
 
     for scoring_model in scoring_models:
         print(f"Scoring samples using {scoring_model.__class__.__name__}...")
@@ -310,8 +306,13 @@ def main() -> None:
     config = load_config(args.config)
     print(f"Loaded evaluation config from {args.config}")
 
-    feature_extractors = [load_feature_extractor(fe_config) for fe_config in config.feature_extractors]
-    scoring_models = [load_scoring_model(sm_config) for sm_config in config.scoring_models]
+    feature_extractors = {fe_name: FEATURE_EXTRACTORS[fe_name] for fe_name in config.feature_extractors}
+    print(f"Initialized feature extractors: {feature_extractors}")
+    # feature_extractors = [FE(fe_config) for fe_config in config.feature_extractors]
+    if config.scoring_models is None:
+        scoring_models = []
+    else:
+        scoring_models = [load_scoring_model(sm_config) for sm_config in config.scoring_models]
     # aggregators = [load_aggregator(agg_config) for agg_config in config.aggregators]
 
     eval_results = run_evaluation(

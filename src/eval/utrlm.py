@@ -8,6 +8,7 @@ from typing import Iterable, Literal
 import pandas as pd
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 
 
 Task = Literal["mrl", "te", "el"]
@@ -42,6 +43,22 @@ class UTRLMPredictions:
     mrl: float | None = None
     te: float | None = None
     el: float | None = None
+
+
+def print_mps_memory_usage():
+    if not torch.backends.mps.is_available():
+        print("MPS not available")
+        return
+
+    allocated = torch.mps.current_allocated_memory()
+    driver = torch.mps.driver_allocated_memory()
+    max_recommended = torch.mps.recommended_max_memory()
+
+    print(f"Tensor allocated: {allocated / 1024**3:.2f} GB")
+    print(f"Driver allocated: {driver / 1024**3:.2f} GB")
+    print(f"Recommended max:  {max_recommended / 1024**3:.2f} GB")
+    print(f"Tensor usage:     {100 * allocated / max_recommended:.1f}%")
+    print(f"Driver usage:     {100 * driver / max_recommended:.1f}%")
 
 
 class UTRLMHead(nn.Module):
@@ -191,10 +208,14 @@ class UTRLMPredictor:
         fold: int | None = None,
         finetuned: bool = True,
         trim_te_el_to_last_100: bool = True,
+        batch_size: int = 32,
         mrl_model_path: str | Path | None = None,
         te_model_paths: Iterable[str | Path] | None = None,
         el_model_paths: Iterable[str | Path] | None = None,
     ) -> None:
+        if batch_size <= 0:
+            raise ValueError("UTR-LM batch_size must be greater than 0.")
+
         self.utrlm_root = Path(utrlm_root)
         self.device = choose_device(device)
         self.te_cell_line = normalize_cell_line(te_cell_line)
@@ -202,6 +223,7 @@ class UTRLMPredictor:
         self.fold = fold
         self.finetuned = finetuned
         self.trim_te_el_to_last_100 = trim_te_el_to_last_100
+        self.batch_size = batch_size
 
         self.mrl_model_path = Path(mrl_model_path) if mrl_model_path is not None else mrl_checkpoint(self.utrlm_root)
         self._te_model_paths_override = (
@@ -259,6 +281,7 @@ class UTRLMPredictor:
         rows: pd.DataFrame | Iterable[dict[str, str]],
         *,
         tasks: Iterable[Task] = ("mrl", "te", "el"),
+        progress_bar: bool = True,
     ) -> pd.DataFrame:
         samples = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
         samples = samples.fillna("")
@@ -274,18 +297,21 @@ class UTRLMPredictor:
                 sequences=utr5_sequences,
                 task="mrl",
                 model_paths=[self.mrl_model_path],
+                progress_bar=progress_bar,
             )
         if "te" in requested_tasks:
             output["utrlm_te"] = self._predict_sequences(
                 sequences=self._prepare_te_el_sequences(utr5_sequences),
                 task="te",
                 model_paths=self._model_paths_for_task("te"),
+                progress_bar=progress_bar,
             )
         if "el" in requested_tasks:
             output["utrlm_el"] = self._predict_sequences(
                 sequences=self._prepare_te_el_sequences(utr5_sequences),
                 task="el",
                 model_paths=self._model_paths_for_task("el"),
+                progress_bar=progress_bar,
             )
 
         return pd.DataFrame(output, index=samples.index)
@@ -322,19 +348,36 @@ class UTRLMPredictor:
         sequences: list[str],
         task: Task,
         model_paths: list[Path],
+        progress_bar: bool = True,
     ) -> list[float]:
         if not sequences:
             return []
 
         predictions = torch.zeros(len(sequences), dtype=torch.float32)
-        tokens = self._tokenize_many(sequences).to(self.device)
+        models = [self._load_model(task, model_path) for model_path in model_paths]
 
-        for model_path in model_paths:
-            model = self._load_model(task, model_path)
-            with torch.no_grad():
-                predictions += model(tokens).reshape(-1).detach().cpu()
+        print(f"Predicting UTR-LM {task.upper()} with {len(models)} model(s) on {self.device}...")
+        print(f"Batch size: {self.batch_size}")
 
-        predictions /= len(model_paths)
+        iterator = range(0, len(sequences), self.batch_size)
+        if progress_bar:
+            iterator = tqdm(
+                iterator,
+                desc=f"Predicting UTR-LM {task.upper()}",
+                unit="batch",
+                total=(len(sequences) + self.batch_size - 1) // self.batch_size,
+            )
+
+
+        with torch.no_grad():
+            for start in iterator:
+                end = min(start + self.batch_size, len(sequences))
+                tokens = self._tokenize_many(sequences[start:end]).to(self.device)
+                for model in models:
+                    predictions[start:end] += model(tokens).reshape(-1).detach().cpu()
+                print_mps_memory_usage()
+
+        predictions /= len(models)
         return predictions.tolist()
 
     def _load_model(self, task: Task, model_path: Path) -> UTRLMHead:
