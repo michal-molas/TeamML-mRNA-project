@@ -1,11 +1,12 @@
 #!/bin/bash -x
 #SBATCH --account=hai_1223  	 	     # Account details
 #SBATCH --cpus-per-task=48
-#SBATCH --gres=gpu:1                     # Use the 4 GPUs available
-#SBATCH --output=out/output.%j               # File for standard output
-#SBATCH --error=err/error.%j                 # File for standard error
-#SBATCH --time=10:00:00                  # Maximum runtime
+#SBATCH --gres=gpu:1                     
+#SBATCH --time=12:00:00                  # Maximum runtime
 #SBATCH --partition=booster              # Specified machine partition
+#SBATCH --output=out/out_%A_%a.txt
+#SBATCH --error=err/err_%A_%a.txt
+#SBATCH --array=0-11
 
 # To get number of cpu per task
 export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
@@ -13,15 +14,27 @@ export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
 # activate env
 source ../../venv_setup/activate.sh
 
+nlambdas=(0.5 1.0 2.0 4.0)
+lrs=(5e-5 1e-4 3e-4)
+
+lambda_idx=$((SLURM_ARRAY_TASK_ID % 4))
+lr_idx=$((SLURM_ARRAY_TASK_ID / 4))
+
+LR=${lrs[$lr_idx]}
+LAMBDA=${nlambdas[$lambda_idx]}
+
+echo "Running with LR=$LR, LAMBDA=$LAMBDA"
+
 # run script 
-# time srun python3 pretrain.py --output_path model_state_dict/utr53_pretrained.pt
-    # --csv_path ../../data/finetuning/ribonn/ribonn_human.xlsx \
 time srun python3 finetune.py \
+    --lambda_ribonn $LAMBDA \
+    --learning_rate $LR \
+    --epochs 30 \
     --csv_path ../../data/finetuning/ribonn/dataset.csv \
     --pretrained_path model_state_dict/utr53_pretrained.pt \
-    --output_path model_state_dict/finetuning_checkpoint.pt \
+    --output_path model_state_dict/finetuning_lr_${LR}_lambda_${LAMBDA}.pt \
     --ribonn_weights ../../RiboNN/models/human/0ad046d67ba7481881d5c7f918acedb4/state_dict.pth \
     --ribonn_weights_folder ../../RiboNN/models/human \
+    --wandb_project ribonn-finetune-parameter-grid \
     --wandb
     
-
