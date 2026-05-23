@@ -15,8 +15,13 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 from types import SimpleNamespace
 
-sys.path.append('../transformer_training')
-from models import MRNACsvDataset
+# sys.path.append('../transformer_training')
+# from models import MRNACsvDataset
+
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from transformer_training.models import MRNACsvDataset, MRNATransformer
+sys.path.remove(str(Path(__file__).resolve().parents[2]))
 
 from main import IndigoTransformer
 
