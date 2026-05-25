@@ -507,7 +507,7 @@ def collate_indigo_batch(samples, pad_id, eos_id, gen_order="random",
     if gen_order == "sao":
         samples_with_targets = []
         for sample in samples:
-            prefix_tokens, target_tokens = extract_prefix_and_target(sample, pad_id)
+            prefix_tokens, target_tokens, _ = extract_prefix_and_target(sample, pad_id)
             if len(target_tokens) >= 2:
                 samples_with_targets.append((prefix_tokens, target_tokens))
         if not samples_with_targets:
@@ -526,7 +526,7 @@ def collate_indigo_batch(samples, pad_id, eos_id, gen_order="random",
                 )
     else:
         for sample in samples:
-            prefix_tokens, target_tokens = extract_prefix_and_target(sample, pad_id)
+            prefix_tokens, target_tokens, _ = extract_prefix_and_target(sample, pad_id)
             if len(target_tokens) < 2:
                 continue
             tensors = build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order)
@@ -710,7 +710,7 @@ def extract_prefix_and_target(sample, pad_id):
     prefix_tokens = input_ids_raw[:prefix_end + 1].tolist()
     target_tokens = target_ids_raw[prefix_end:].tolist()
     target_tokens = [t for t in target_tokens if t != pad_id]
-    return prefix_tokens, target_tokens
+    return prefix_tokens, target_tokens, prefix_end
 
 
 def compute_validation_loss(args, model, val_dataset, pad_id, eos_id, batch_size, device,

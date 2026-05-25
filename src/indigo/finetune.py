@@ -116,7 +116,7 @@ class RiboNNEnsemble(torch.nn.Module):
 # ============================================================
 
 
-from pretrain import build_full_R_matrix, compute_position_targets, make_generation_perm, _extend_R, _score_remaining, beam_search_perms, _extend_beam_state
+from pretrain import build_full_R_matrix, compute_position_targets, make_generation_perm, _extend_R, _score_remaining, beam_search_perms, _extend_beam_state, extract_prefix_and_target
 
 
 # ============================================================
@@ -124,20 +124,20 @@ from pretrain import build_full_R_matrix, compute_position_targets, make_generat
 # ============================================================
 
 # change: returns also prefix end
-def extract_prefix_and_target(sample, pad_id):
-    input_ids_raw = sample["input_ids"]
-    target_ids_raw = sample["target_ids"]
-    loss_mask = sample["loss_mask"]
+# def extract_prefix_and_target(sample, pad_id):
+#     input_ids_raw = sample["input_ids"]
+#     target_ids_raw = sample["target_ids"]
+#     loss_mask = sample["loss_mask"]
 
-    ones = (loss_mask == 1).nonzero(as_tuple=True)[0]
-    if len(ones) == 0:
-        return None
+#     ones = (loss_mask == 1).nonzero(as_tuple=True)[0]
+#     if len(ones) == 0:
+#         return None
 
-    prefix_end = int(ones[0])
-    prefix_tokens = input_ids_raw[:prefix_end + 1].tolist()
-    target_tokens = target_ids_raw[prefix_end:].tolist()
-    target_tokens = [t for t in target_tokens if t != pad_id]
-    return prefix_tokens, target_tokens, prefix_end
+#     prefix_end = int(ones[0])
+#     prefix_tokens = input_ids_raw[:prefix_end + 1].tolist()
+#     target_tokens = target_ids_raw[prefix_end:].tolist()
+#     target_tokens = [t for t in target_tokens if t != pad_id]
+#     return prefix_tokens, target_tokens, prefix_end
 
 # change: returns also perm
 def build_training_tensors(prefix_tokens, target_tokens, eos_id, gen_order="random", perm=None):
