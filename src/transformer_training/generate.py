@@ -251,10 +251,10 @@ def generate_samples(
 def _get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate UTR sequences from a trained model.")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the trained model checkpoint.")
-    parser.add_argument("--d_model", type=int, default=512, help="Dimension of the model.")
+    parser.add_argument("--d_model", type=int, default=256, help="Dimension of the model.")
     parser.add_argument("--nheads", type=int, default=8, help="Number of attention heads.")
     parser.add_argument("--n_layers", type=int, default=6, help="Number of transformer layers.")
-    parser.add_argument("--max_len", type=int, default=512, help="Maximum sequence length for generation.")
+    parser.add_argument("--max_len", type=int, default=904, help="Maximum sequence length for generation.")
     parser.add_argument("--dataset_csv", type=str, default="data/pretraining/small_test.csv", help="Path to the input dataset CSV file.")
     parser.add_argument("--output_csv", type=str, default="generated_samples.csv", help="Path to save the generated samples CSV file.")
     parser.add_argument("--samples_per_cds", type=int, default=3, help="Number of samples to generate per CDS.")
@@ -277,7 +277,7 @@ def main() -> None:
         d_model=args.d_model,
         nhead=args.nheads,
         num_layers=args.n_layers,
-        max_len=768,
+        max_len=args.max_len,
     ).to(device)
     load_pretrained_weights(model, args.model_path, device)
     print(f"Loaded model from {args.model_path}")
