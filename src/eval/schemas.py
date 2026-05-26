@@ -1,3 +1,0 @@
-SAMPLE_INDEX_COLS = ["id", "sample"]
-SAMPLE_DATA_COLS = ["cds", "utr5", "utr3"]
-SAMPLE_CSV_COLS = SAMPLE_INDEX_COLS + SAMPLE_DATA_COLS

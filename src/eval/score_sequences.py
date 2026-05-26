@@ -8,12 +8,15 @@ import scorers
 
 
 INDEX_COLS = ["id", "sample"]
+SEQUENCE_COLS = ["utr5", "cds", "utr3"]
 
 EVAL_DIR = "data/evals"
 
 SCORERS = {
     "string_statistics": scorers.StringStatisticsScorer,
     "ribonn": scorers.RiboNNScorer,
+    "rnafold": scorers.RNAfoldScorer,
+    "utrlm": scorers.UTRLMScorer,
 }
 
 
@@ -25,12 +28,24 @@ def _save_scores(scores_df: pd.DataFrame, save_dir: str) -> None:
 
 
 def _sanitize_samples_df(samples_df: pd.DataFrame) -> pd.DataFrame:
-    required_columns = {"id", "utr5", "cds", "utr3"}
+    required_columns = set(INDEX_COLS + SEQUENCE_COLS)
     missing_columns = required_columns - set(samples_df.columns)
     if missing_columns:
         raise ValueError(f"Missing required columns in samples CSV: {missing_columns}")
     samples_df = samples_df.fillna("")
-    return samples_df[["id", "utr5", "cds", "utr3"]]
+    return samples_df[INDEX_COLS + SEQUENCE_COLS]
+
+
+def _with_index_cols(scores_df: pd.DataFrame, samples_df: pd.DataFrame) -> pd.DataFrame:
+    """Attach canonical index columns by row order for scorer outputs."""
+    score_cols = [col for col in scores_df.columns if col not in INDEX_COLS]
+    return pd.concat(
+        [
+            samples_df[INDEX_COLS].reset_index(drop=True),
+            scores_df[score_cols].reset_index(drop=True),
+        ],
+        axis=1,
+    )
 
 
 def _load_samples(samples_csv: str, max_samples: int | None = None) -> pd.DataFrame:
@@ -84,8 +99,8 @@ def main() -> None:
     if samples_csv is None:
         raise ValueError("No samples CSV provided. Please specify --samples_csv or include it in the config file.")
 
-    samlpes_df = _load_samples(samples_csv, max_samples=args.max_samples)
-    samples_df = _sanitize_samples_df(samlpes_df)
+    raw_samples_df = _load_samples(samples_csv, max_samples=args.max_samples)
+    samples_df = _sanitize_samples_df(raw_samples_df)
 
     scorers_list: list[scorers.Scorer] = _load_scorers(config.get("scorers", {}))
 
@@ -93,12 +108,13 @@ def main() -> None:
 
     for scorer in scorers_list:
         print(f"Scoring with {scorer.name}...")
-        scores_dfs[scorer.name] = scorer.score_df(samples_df, index_cols=["id"], progress_bar=True)
+        scores_df = scorer.score_df(samples_df, index_cols=INDEX_COLS, progress_bar=True)
+        scores_dfs[scorer.name] = _with_index_cols(scores_df, samples_df)
 
     # Merge all scores into a single DataFrame
-    final_scores_df = samples_df[["id"]].copy()
+    final_scores_df = samples_df[INDEX_COLS].copy()
     for scorer_name, scores_df in scores_dfs.items():
-        final_scores_df = final_scores_df.merge(scores_df, on="id")
+        final_scores_df = final_scores_df.merge(scores_df, on=INDEX_COLS)
 
     save_dir = config.get("save_dir") or args.save_dir or args.eval_dir
     _save_scores(final_scores_df, save_dir)

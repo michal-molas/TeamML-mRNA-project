@@ -1,32 +1,16 @@
-feature_extractors:
-  - string_statistics
-  - gc_content
+samples_csv: /Users/pawel/TeamML-mRNA-project/data/evals/test_500_pretrained_0423/generated_samples_100.csv
+eval_dir: /Users/pawel/TeamML-mRNA-project/data/evals/scorer_test
 
-scoring_models:
-  # Use single RiboNN model
-  # - type: RiboNN
-  #   weights_path: RiboNN/models/human/a569cb3e25b24729aa634dfc0c58635c/state_dict.pth
-  #   batch_size: 1
-  # Use ensemble of RiboNN models
-  # - type: RiboNN
-  #   weights_folder: RiboNN/models/human
-  #   top_k_models_to_use: 5
-  #   batch_size: 32
-  # - type: RNAfold
-  - type: UTRLM
-
-aggregators:
-  - type: SimpleAverage
+scorers:
+  string_statistics: {}
+  ribonn:
+    weights_path: RiboNN/models/human/a569cb3e25b24729aa634dfc0c58635c/state_dict.pth
+    # weights_folder: RiboNN/models/human
+    top_k_models_to_use: 5
+    # batch_size: 32
+  utrlm: {}
+  rnafold: {}
 
 plots:
-  - type: gt_vs_generated_distribution
-    metrics:
-      - utr5_length_mean
-      - utr3_length_mean
-      - utr5_gc_content_mean
-      - utr3_gc_content_mean
-      # - ribonn_score_mean
-      # - rnafold_mfe_mean
-      - utrlm_mrl_mean
-      # - utrlm_te_mean
-      # - utrlm_el_mean
+  gt_vs_generated_distribution:
+    metrics: {}

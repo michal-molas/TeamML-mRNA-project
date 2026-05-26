@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import TYPE_CHECKING, Iterable
+
+import pandas as pd
+
+from scorers.base import Scorer
+
+if TYPE_CHECKING:
+    import torch
+
 from dataclasses import dataclass
 from pathlib import Path
 import sys
@@ -13,7 +23,7 @@ from tqdm import tqdm
 
 Task = Literal["mrl", "te", "el"]
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_UTRLM_ROOT = PROJECT_ROOT / "UTR-LM"
 UTRLM_SCRIPTS = DEFAULT_UTRLM_ROOT / "Scripts"
 if UTRLM_SCRIPTS.exists():
@@ -45,20 +55,55 @@ class UTRLMPredictions:
     el: float | None = None
 
 
-def print_mps_memory_usage():
-    if not torch.backends.mps.is_available():
-        print("MPS not available")
-        return
+@dataclass(frozen=True)
+class MPSMemorySample:
+    allocated: int
+    driver: int
+    max_recommended: int
 
-    allocated = torch.mps.current_allocated_memory()
-    driver = torch.mps.driver_allocated_memory()
-    max_recommended = torch.mps.recommended_max_memory()
 
-    print(f"Tensor allocated: {allocated / 1024**3:.2f} GB")
-    print(f"Driver allocated: {driver / 1024**3:.2f} GB")
-    print(f"Recommended max:  {max_recommended / 1024**3:.2f} GB")
-    print(f"Tensor usage:     {100 * allocated / max_recommended:.1f}%")
-    print(f"Driver usage:     {100 * driver / max_recommended:.1f}%")
+class MPSMemoryProfiler:
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.samples: list[MPSMemorySample] = []
+
+    @property
+    def available(self) -> bool:
+        return hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+
+    def sample(self) -> None:
+        if not self.enabled or not self.available:
+            return
+        self.samples.append(
+            MPSMemorySample(
+                allocated=torch.mps.current_allocated_memory(),
+                driver=torch.mps.driver_allocated_memory(),
+                max_recommended=torch.mps.recommended_max_memory(),
+            )
+        )
+
+    def print_summary(self, label: str) -> None:
+        if not self.samples:
+            return
+
+        allocated = [sample.allocated for sample in self.samples]
+        driver = [sample.driver for sample in self.samples]
+        max_recommended = self.samples[-1].max_recommended
+
+        def mean(values: list[int]) -> float:
+            return sum(values) / len(values)
+
+        def gb(value: float) -> float:
+            return value / 1024**3
+
+        def percent(value: float) -> float:
+            return 100 * value / max_recommended if max_recommended else 0.0
+
+        print(f"MPS memory during {label} ({len(self.samples)} batch samples):")
+        print(f"Tensor allocated: mean {gb(mean(allocated)):.2f} GB, max {gb(max(allocated)):.2f} GB")
+        print(f"Driver allocated: mean {gb(mean(driver)):.2f} GB, max {gb(max(driver)):.2f} GB")
+        print(f"Tensor usage:     mean {percent(mean(allocated)):.1f}%, max {percent(max(allocated)):.1f}%")
+        print(f"Driver usage:     mean {percent(mean(driver)):.1f}%, max {percent(max(driver)):.1f}%")
 
 
 class UTRLMHead(nn.Module):
@@ -358,6 +403,7 @@ class UTRLMPredictor:
 
         print(f"Predicting UTR-LM {task.upper()} with {len(models)} model(s) on {self.device}...")
         print(f"Batch size: {self.batch_size}")
+        memory_profiler = MPSMemoryProfiler(enabled=self.device.type == "mps")
 
         iterator = range(0, len(sequences), self.batch_size)
         if progress_bar:
@@ -375,8 +421,9 @@ class UTRLMPredictor:
                 tokens = self._tokenize_many(sequences[start:end]).to(self.device)
                 for model in models:
                     predictions[start:end] += model(tokens).reshape(-1).detach().cpu()
-                print_mps_memory_usage()
+                memory_profiler.sample()
 
+        memory_profiler.print_summary(f"UTR-LM {task.upper()} inference")
         predictions /= len(models)
         return predictions.tolist()
 
@@ -402,3 +449,82 @@ class UTRLMPredictor:
         for index, seq in enumerate(encoded):
             tokens[index, : len(seq)] = torch.tensor(seq, dtype=torch.long)
         return tokens
+
+
+
+
+class UTRLMScorer(Scorer):
+    name = "UTRLM"
+    score_names = (
+        "utrlm_mrl",
+        "utrlm_te",
+        "utrlm_el",
+    )
+
+    def __init__(
+        self,
+        tasks: str | Iterable[str] = ("mrl", "te", "el"),
+        cell_line: str = "HEK",
+        te_cell_line: str | None = None,
+        el_cell_line: str | None = None,
+        fold: int | None = None,
+        finetuned: bool = True,
+        device: str | torch.device | None = None,
+        trim_te_el_to_last_100: bool = True,
+        batch_size: int = 4,
+        utrlm_root: str | Path | None = None,
+        mrl_model_path: str | Path | None = None,
+        te_model_paths: Iterable[str | Path] | None = None,
+        el_model_paths: Iterable[str | Path] | None = None,
+    ) -> None:
+        super().__init__()
+        self.name = "UTRLM"
+        self.tasks = normalize_tasks((tasks,) if isinstance(tasks, str) else tasks)
+        self.score_names = tuple(f"utrlm_{task}" for task in self.tasks)
+
+        predictor_kwargs = {
+            "device": device,
+            "te_cell_line": te_cell_line or cell_line,
+            "el_cell_line": el_cell_line or cell_line,
+            "fold": fold,
+            "finetuned": finetuned,
+            "trim_te_el_to_last_100": trim_te_el_to_last_100,
+            "batch_size": batch_size,
+            "mrl_model_path": mrl_model_path,
+            "te_model_paths": te_model_paths,
+            "el_model_paths": el_model_paths,
+        }
+        if utrlm_root is not None:
+            predictor_kwargs["utrlm_root"] = utrlm_root
+
+        self.predictor = UTRLMPredictor(**predictor_kwargs)
+
+    def score(
+        self,
+        utr5: str,
+        cds: str,
+        utr3: str,
+    ) -> dict[str, float]:
+        return self.predictor.predict_dict(
+            utr5=utr5,
+            cds=cds,
+            utr3=utr3,
+            tasks=self.tasks,
+        )
+
+    def score_df(
+        self,
+        df: pd.DataFrame,
+        index_cols: list[str] = ["id"],
+        progress_bar: bool = False,
+    ) -> pd.DataFrame:
+        samples = df.fillna("")
+        scores = self.predictor.predict_many(
+            samples,
+            tasks=self.tasks,
+            progress_bar=progress_bar,
+        )
+        return pd.concat(
+            [samples[index_cols].reset_index(drop=True), scores.reset_index(drop=True)],
+            axis=1,
+        )

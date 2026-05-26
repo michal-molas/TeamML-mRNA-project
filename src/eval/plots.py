@@ -1,57 +1,35 @@
+import os
 
-from matplotlib import pyplot as plt
-import seaborn as sns
+import matplotlib.pyplot as plt
 import pandas as pd
-
-
-def _gt_vs_generated_distribution(
-    gt_metrics: pd.DataFrame,
-    generated_metrics: pd.DataFrame,
-    metric: str,
-    save_dir: str,
-) -> None:
-    plt.figure(figsize=(8, 6))
-    sns.kdeplot(gt_metrics[metric], label="Ground Truth", fill=True)
-    sns.kdeplot(generated_metrics[metric], label="Generated", fill=True)
-    plt.title(f"Distribution of {metric} for GT vs Generated")
-    plt.legend()
-    plt.tight_layout()
-
-    save_path = f"{save_dir}/gt_vs_generated_{metric}.png"
-    plt.savefig(save_path)
-    plt.close()
+import seaborn as sns
 
 
 def gt_vs_generated_distribution(
-    eval_results: dict[str, pd.DataFrame | dict[str, pd.DataFrame]],
-    config: dict,
+    stats: dict[str, dict[str, pd.DataFrame]],
     save_dir: str,
+    config: dict,
 ) -> None:
-    gt_metrics = eval_results["cds_metrics"]["gt"]
-    generated_metrics = eval_results["cds_metrics"]["generated"]
+    gt_metrics = stats["gt"]["cds"]
+    generated_metrics = stats["generated"]["cds"]
 
     metrics = config["metrics"]  # List of metric columns to compare
 
+    # if metrics is empty, default to all columns except id and sample
+    if not metrics:
+        metrics = [col for col in gt_metrics.columns if col not in ["id", "sample"] and "mean" in col]
+
+    plot_dir = f"{save_dir}/gt_vs_generated_distribution"
+    os.makedirs(plot_dir, exist_ok=True)
+
     for metric in metrics:
-        _gt_vs_generated_distribution(gt_metrics, generated_metrics, metric, save_dir)
+        plt.figure(figsize=(8, 6))
+        sns.kdeplot(gt_metrics[metric], label="Ground Truth", fill=True)
+        sns.kdeplot(generated_metrics[metric], label="Generated", fill=True)
+        plt.title(f"Distribution of {metric} for GT vs Generated")
+        plt.legend()
+        plt.tight_layout()
 
-
-def feature_distribution(
-    eval_results: dict[str, pd.DataFrame | dict[str, pd.DataFrame]],
-    config: dict,
-    save_dir: str,
-) -> None:
-    table = config.get("table", "features")  # Default to "features" table if not specified
-    df = eval_results.get(table)
-    if df is None:
-        print(f"Table {table} not found in eval results, cannot generate plot.")
-        return
-    feature = config.get("feature", "cds_length")  # Default to "cds_length" if not specified
-
-    plt.figure(figsize=(8, 6))
-    sns.histplot(df[feature], kde=True)
-    plt.title(f"Distribution of {feature}")
-    plt.tight_layout()
-    save_path = f"{save_dir}/feature_distribution_{feature}.png"
-    plt.savefig(save_path)
-    plt.close()
+        save_path = f"{plot_dir}/{metric}.png"
+        plt.savefig(save_path)
+        plt.close()
