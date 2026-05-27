@@ -1,3 +1,5 @@
+from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pandas as pd
@@ -5,13 +7,79 @@ import torch
 from tqdm import tqdm
 
 from scorers.base import Scorer
-from transformer_training.ribonn_utils import (
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "transformer_training"))
+from finetune import (
     RIBONN_CONFIG,
     RIBONN_MAX_TX_LEN,
     load_ribonn,
     ribonn_predict_using_nested_cross_validation_models,
-    ribonn_input_from_string,
 )
+
+
+def ribonn_input_from_string(
+    utr5: str,
+    cds: str,
+    utr3: str,
+    ribonn_max_len: int,
+    label_codons: bool = True,
+) -> torch.Tensor:
+    """
+    Convert sequence strings into a RiboNN-compatible tensor.
+
+    Vocab/channel order:
+        A = 0
+        U/T = 1
+        C = 2
+        G = 3
+
+    RiboNN input layout:
+        [ utr5 | cds | utr3 | padding ]
+
+    Returns:
+        Tensor of shape (num_channels, ribonn_max_len)
+        where num_channels = 4 or 5 if label_codons=True.
+    """
+    seq = utr5 + cds + utr3
+    total_len = len(seq)
+
+    if total_len > ribonn_max_len:
+        raise ValueError(
+            f"Sequence length {total_len} exceeds ribonn_max_len={ribonn_max_len}. "
+            f"Lengths: utr5={len(utr5)}, cds={len(cds)}, utr3={len(utr3)}"
+        )
+
+    num_channels = 5 if label_codons else 4
+    out = torch.zeros(num_channels, ribonn_max_len, dtype=torch.float32)
+
+    nt_to_idx = {
+        "A": 0,
+        "U": 1,
+        "T": 1,
+        "C": 2,
+        "G": 3,
+    }
+
+    for pos, nt in enumerate(seq.upper()):
+        try:
+            channel = nt_to_idx[nt]
+        except KeyError:
+            raise ValueError(
+                f"Invalid nucleotide {nt!r} at position {pos}. "
+                "Allowed nucleotides: A, U, T, C, G."
+            )
+
+        out[channel, pos] = 1.0
+
+    if label_codons:
+        cds_start = len(utr5)
+        cds_end = len(utr5) + len(cds)
+
+        # Label every first nucleotide of a codon inside CDS only
+        for codon_pos in range(cds_start, cds_end, 3):
+            out[4, codon_pos] = 1.0
+
+    return out
 
 
 class RiboNNScorer(Scorer):

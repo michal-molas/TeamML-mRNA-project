@@ -121,9 +121,9 @@ class MRNACsvDataset(Dataset):
             cds_str = str(row["cds"]).upper()
             utr3_str = str(row["utr3"])[:self.max_utr3_len].upper()
 
-            utr5_tokens = self.tokenizer.tokenize(utr5_str)
-            cds_tokens = self.tokenizer.tokenize(cds_str)
-            utr3_tokens = self.tokenizer.tokenize(utr3_str)
+            utr5_tokens = self.tokenize(utr5_str)
+            cds_tokens = self.tokenize(cds_str)
+            utr3_tokens = self.tokenize(utr3_str)
             utr5_len = len(utr5_tokens)
             cds_len = len(cds_tokens)
             utr3_len = len(utr3_tokens)
