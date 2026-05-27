@@ -9,22 +9,13 @@ import torch.distributed as dist
 from torch.optim import AdamW
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data._utils.collate import default_collate
-from tqdm import tqdm
 from dotenv import load_dotenv
+from tqdm import tqdm
+import wandb
 
-try:
-    import wandb
-except ImportError:  # pragma: no cover
-    wandb = None
-
-try:
-    from .data import MRNALoArmDataset
-    from .loss import compute_lo_arm_loss
-    from .model import LoArmConfig, LoArmTransformer
-except ImportError:  # pragma: no cover - supports `python train.py`
-    from data import MRNALoArmDataset
-    from loss import compute_lo_arm_loss
-    from model import LoArmConfig, LoArmTransformer
+from data import MRNALoArmDataset
+from loss import compute_lo_arm_loss
+from model import LoArmConfig, LoArmTransformer
 
 
 def _to_device(batch, device):
@@ -310,6 +301,7 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
         all_indices = list(range(len(train_dataset)))
         rng = random.Random(args.seed + epoch)
         rng.shuffle(all_indices)
+        rng.shuffle(train_depths)
         if distributed and len(all_indices) % world_size != 0:
             pad = world_size - (len(all_indices) % world_size)
             all_indices.extend(all_indices[:pad])
@@ -344,7 +336,7 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
             global_step += 1
 
             _accumulate_train_log(train_log_accumulator, metrics, grad_norm)
-            if args.wandb and wandb is not None and global_step % args.log_every == 0 and rank == 0:
+            if args.wandb and global_step % args.log_every == 0 and rank == 0:
                 wandb.log(_wandb_train_metrics(train_log_accumulator), step=global_step)
                 train_log_accumulator = _new_train_log_accumulator(train_depths)
 
@@ -369,7 +361,7 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
         val_loss = val_metrics["negative_elbo"]
         if rank == 0:
             print(f"Epoch {epoch} | train_loss={train_loss:.4f} val_neg_elbo={val_loss:.4f}")
-        if args.wandb and wandb is not None and rank == 0:
+        if args.wandb and rank == 0:
             wandb.log(
                 {"epoch/train_loss": train_loss, **_wandb_validation_metrics(val_metrics)},
                 step=global_step,
@@ -428,7 +420,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_csv_path", default="../../data/pretraining/dataset_with_utr3/train.csv")
     parser.add_argument("--test_csv_path", default="../../data/pretraining/dataset_with_utr3/test.csv")
-    parser.add_argument("--output_path", default=None)
+    parser.add_argument("--output_path", default="../../data/models/lo_arm_transformer.pt")
     parser.add_argument("--k", type=int, default=3)
     parser.add_argument("--max_utr5_len", type=int, default=200)
     parser.add_argument("--max_cds_len", type=int, default=500)
@@ -456,8 +448,6 @@ def main():
     distributed, rank, world_size, local_rank, device = init_distributed_from_environment()
 
     if args.wandb and rank == 0:
-        if wandb is None:
-            raise RuntimeError("wandb is not installed")
         wandb.init(project=args.wandb_project, config=vars(args), dir="../../logs")
 
     train(
@@ -469,7 +459,7 @@ def main():
         local_rank=local_rank,
     )
 
-    if args.wandb and wandb is not None and rank == 0:
+    if args.wandb and rank == 0:
         wandb.finish()
 
     if distributed:

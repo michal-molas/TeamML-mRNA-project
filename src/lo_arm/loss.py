@@ -1,10 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-try:
-    from .data import build_model_inputs
-except ImportError:  # pragma: no cover - supports `python train.py`
-    from data import build_model_inputs
+from data import build_model_inputs
 
 
 def mask_value_logits(value_logits, mask_id):
