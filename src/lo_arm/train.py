@@ -155,16 +155,78 @@ def validate(
     }
 
 
-def _wandb_train_metrics(metrics, grad_norm):
+TRAIN_LOG_METRIC_NAMES = [
+    "loss",
+    "negative_elbo",
+    "order_entropy",
+    "posterior_entropy",
+    "value_nll",
+    "grad_norm",
+    "n_previous",
+]
+
+
+def _new_train_log_accumulator(depths):
     return {
-        "train/loss": float(metrics["loss"].item()),
-        "train/negative_elbo": float(metrics["negative_elbo"].item()),
-        "train/n_previous": metrics["n_previous"],
-        "train/order_entropy": float(metrics["order_entropy"].item()),
-        "train/posterior_entropy": float(metrics["posterior_entropy"].item()),
-        "train/value_nll": float(metrics["value_nll"].item()),
-        "train/grad_norm": float(grad_norm.item()),
+        "overall": {metric_name: 0.0 for metric_name in TRAIN_LOG_METRIC_NAMES},
+        "overall_count": 0,
+        "by_depth": {
+            depth: {
+                "metrics": {
+                    metric_name: 0.0 for metric_name in TRAIN_LOG_METRIC_NAMES
+                },
+                "count": 0,
+            }
+            for depth in depths
+        },
     }
+
+
+def _metric_float(value):
+    if torch.is_tensor(value):
+        return float(value.detach().item())
+    return float(value)
+
+
+def _accumulate_train_log(accumulator, metrics, grad_norm):
+    depth = int(metrics["n_previous"])
+    values = {
+        "loss": _metric_float(metrics["loss"]),
+        "negative_elbo": _metric_float(metrics["negative_elbo"]),
+        "order_entropy": _metric_float(metrics["order_entropy"]),
+        "posterior_entropy": _metric_float(metrics["posterior_entropy"]),
+        "value_nll": _metric_float(metrics["value_nll"]),
+        "grad_norm": _metric_float(grad_norm),
+        "n_previous": float(depth),
+    }
+
+    for metric_name, value in values.items():
+        accumulator["overall"][metric_name] += value
+        accumulator["by_depth"][depth]["metrics"][metric_name] += value
+    accumulator["overall_count"] += 1
+    accumulator["by_depth"][depth]["count"] += 1
+
+
+def _wandb_train_metrics(accumulator):
+    count = accumulator["overall_count"]
+    if count == 0:
+        return {}
+
+    logs = {
+        f"train/{metric_name}": total / count
+        for metric_name, total in accumulator["overall"].items()
+    }
+    logs["train/log_window_steps"] = count
+
+    for depth, depth_state in accumulator["by_depth"].items():
+        depth_count = depth_state["count"]
+        logs[f"train/depth_count/{depth}"] = depth_count
+        if depth_count == 0:
+            continue
+        for metric_name, total in depth_state["metrics"].items():
+            logs[f"train/{metric_name}_by_depth/{depth}"] = total / depth_count
+
+    return logs
 
 
 def _wandb_validation_metrics(val_metrics):
@@ -238,6 +300,8 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
     best_val = float("inf")
     global_step = 0
     train_depths = _depth_buckets(train_dataset.target_len)
+    train_log_accumulator = _new_train_log_accumulator(train_depths)
+    print(f"Using train depths: {train_depths}")
     for epoch in range(args.epochs):
         model.train()
         loss_sum = 0.0
@@ -278,8 +342,16 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
             loss_sum += float(loss.item()) * batch_count
             count += batch_count
             global_step += 1
+
+            print(f"Step {global_step}, train metrics:")
+            print(metrics)
+            print(f"Step {global_step}, train log accumulator:")
+            print(train_log_accumulator)
+
+            _accumulate_train_log(train_log_accumulator, metrics, grad_norm)
             if args.wandb and wandb is not None and global_step % args.log_every == 0 and rank == 0:
-                wandb.log(_wandb_train_metrics(metrics, grad_norm), step=global_step)
+                wandb.log(_wandb_train_metrics(train_log_accumulator), step=global_step)
+                train_log_accumulator = _new_train_log_accumulator(train_depths)
 
         if distributed:
             totals = torch.tensor([loss_sum, float(count)], device=device)
