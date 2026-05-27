@@ -24,6 +24,130 @@ from ribonn_utils import (
 )
 
 
+def load_ribonn(weights_path, device, verbose=False):
+    """Load frozen RiboNN weights from the submodule. Returns (model, RIBONN_MAX_TX_LEN)."""
+
+    config = dict(RIBONN_CONFIG)
+    model = RiboNN(**config)
+
+    state_dict = torch.load(weights_path, map_location=device)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
+    if verbose:
+        print(
+            f"[ribonn] loaded {weights_path}  missing={len(missing)}  unexpected={len(unexpected)}"
+        )
+
+    model.to(device)
+    model.eval()
+    for p in model.parameters():
+        p.requires_grad = False
+
+    return model, RIBONN_MAX_TX_LEN
+
+
+def build_ribonn_input(
+    lm_logits,
+    input_ids,
+    utr5_lens,
+    cds_lens,
+    utr3_lens,
+    ribonn_max_len,
+    label_codons=True,
+):
+    """
+    Convert LM logits into a RiboNN-compatible tensor via Gumbel-softmax.
+
+    Vocab order A=0,U/T=1,C=2,G=3 matches RiboNN channels.
+    RiboNN input layout: [ utr5 | cds | utr3 | padding ]  (zero-padded to ribonn_max_len)
+    UTR5 is stored reversed in the LM; we flip it back here.
+
+    Returns: (N, num_channels, ribonn_max_len)  — channels: A,U/T,C,G [+ codon_label]
+    """
+    batch_size = lm_logits.size(0)
+    device = lm_logits.device
+    num_channels = 5 if label_codons else 4
+    out = torch.zeros(batch_size, num_channels, ribonn_max_len, device=device)
+
+    # Nucleotide channels 0-3 already match RiboNN, but we have to drop special-token logits
+    soft_nt = F.gumbel_softmax(lm_logits)[:, :, :4]
+
+    for i in range(batch_size):
+        utr5_len = int(utr5_lens[i].item())
+        cds_len  = int(cds_lens[i].item())
+        utr3_len = int(utr3_lens[i].item())
+
+        # UTR5
+        utr5_start = 2 + cds_len + 1 # after <BOS>, <CDS>, CDS tokens and <UTR5>
+        utr5_end = utr5_start + utr5_len
+
+        utr5_out_start = 0
+        utr5_out_end = utr5_len
+        out[i, :4, utr5_out_start:utr5_out_end] = soft_nt[i, utr5_start:utr5_end].flip(0).T
+
+        # CDS (Here we use one-hot encoding instead of Gumbel-softmax)
+        cds_start = 2 # after <BOS>, <CDS>
+        cds_end = cds_start + cds_len
+
+        cds_tokens = input_ids[i, cds_start:cds_end]
+        cds_out_start = utr5_len
+        cds_out_end = utr5_len + cds_len
+        out[i, :4, cds_out_start:cds_out_end] = F.one_hot(cds_tokens, 4).float().T
+
+        # UTR3
+        utr3_start = 2 + cds_len + 1 + utr5_len + 1 # after <BOS>, <CDS>, CDS tokens, <UTR5>, UTR5 tokens and <UTR3> token 
+        utr3_end = utr3_start + utr3_len
+
+        utr3_out_start = utr5_len + cds_len
+        utr3_out_end = utr5_len + cds_len + utr3_len
+        out[i, :4, utr3_out_start:utr3_out_end] = soft_nt[i, utr3_start:utr3_end].T
+
+        # Codon-label channel
+        if label_codons:
+            # Label every first nucleotide of a codon (every 3rd position) in CDS (UTRs should not be labeled)
+            for codon_pos in range(cds_out_start, cds_out_end, 3):
+                if codon_pos < cds_out_end:
+                    out[i, 4, codon_pos] = 1.0
+
+    return out  # (N, num_channels, ribonn_max_len)
+
+
+def load_pretrained_weights(model, checkpoint_path, device):
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+    missing, unexpected = model.load_state_dict(state_dict, strict=True)
+    print(
+        f"Loaded {checkpoint_path}  missing={len(missing)}  unexpected={len(unexpected)}"
+    )
+
+def ribonn_predict_using_nested_cross_validation_models(args, device, ribonn_input, batch_width):
+    ## RiboNN.src.predict.predict_using_nested_cross_validation_models() ##
+    RIBONN_COLUMNS = 78
+    run_df = pd.read_csv(args.ribonn_weights_folder + '/runs.csv') 
+    all_predictions = torch.zeros((batch_width, RIBONN_COLUMNS), device=device)
+    prediction_num = 0
+    for test_fold in np.sort(run_df["params.test_fold"].unique()):
+        test_fold_str = str(test_fold)
+        sub_run_df = run_df.query(
+            "`params.test_fold` == @test_fold_str or `params.test_fold` == @test_fold"
+        ).reset_index(drop=True)
+
+        ## RiboNN.src.predict.predict_using_models_trained_in_one_fold() ##
+        top_k_models_to_use = 5
+        sub_run_df = sub_run_df.sort_values("metrics.val_r2", ascending=False).head(top_k_models_to_use)
+
+        for run_id in sub_run_df.run_id:
+            # Create a new model
+            local_state_dict_path = f"{args.ribonn_weights_folder}/{run_id}/state_dict.pth"
+            ribonn_model, _ = load_ribonn(local_state_dict_path, device)
+            all_predictions += ribonn_model(ribonn_input)
+            prediction_num += 1
+
+    all_predictions /= prediction_num
+
+    return all_predictions
+
 def train(args, device):
 
     dataset = MRNACsvDataset(
@@ -234,7 +358,7 @@ def main():
         help="Weight of RiboNN loss relative to LM loss",
     )
 
-    parser.add_argument("--n_layers", type=int, default=4)
+    parser.add_argument("--n_layers", type=int, default=6)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--max_utr5_len", type=int, default=200)

@@ -1,0 +1,25 @@
+#!/bin/bash -x
+#SBATCH --account=hai_1223
+#SBATCH --cpus-per-task=12
+#SBATCH --ntasks=4
+#SBATCH --gres=gpu:4
+#SBATCH --output=out/output.%j
+#SBATCH --error=err/error.%j
+#SBATCH --time=10:00:00
+#SBATCH --partition=booster
+
+export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
+
+source ../../venv_setup/activate.sh
+
+time srun python3 train.py \
+    --train_csv_path ../../data/pretraining/dataset_with_utr3/train.csv \
+    --test_csv_path ../../data/pretraining/dataset_with_utr3/test.csv \
+    --output_path ../../data/models/lo_arm_pretrained.pt \
+    --n_layers 6 \
+    --d_model 256 \
+    --n_heads 8 \
+    --batch_size 32 \
+    --learning_rate 1e-4 \
+    --epochs 5 \
+    --wandb
