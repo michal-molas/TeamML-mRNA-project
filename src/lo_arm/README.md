@@ -169,8 +169,12 @@ PYTHONPATH=src venv/bin/python -m lo_arm.train --help
 PYTHONPATH=src venv/bin/python -m lo_arm.sample --help
 ```
 
-For cluster training, `submit.sub` mirrors the existing one-GPU SLURM style used
-elsewhere in the repository.
+For cluster training, `submit.sub` mirrors the distributed SLURM style used by
+InDIGO pretraining. It launches four tasks over four GPUs with `srun`; each task
+gets a disjoint shard of the shuffled training indices, validation metrics are
+reduced across ranks, and only rank 0 writes checkpoints and logs to W&B.
+The same training entrypoint also works with `torchrun`; it uses NCCL when CUDA
+is available and falls back to Gloo for CPU-only distributed smoke tests.
 
 ## Future directions
 

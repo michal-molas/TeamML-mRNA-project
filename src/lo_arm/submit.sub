@@ -1,10 +1,11 @@
 #!/bin/bash -x
 #SBATCH --account=hai_1223
 #SBATCH --cpus-per-task=12
-#SBATCH --gres=gpu:1
+#SBATCH --ntasks=4
+#SBATCH --gres=gpu:4
 #SBATCH --output=out/output.%j
 #SBATCH --error=err/error.%j
-#SBATCH --time=00:10:00
+#SBATCH --time=10:00:00
 #SBATCH --partition=booster
 
 export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
