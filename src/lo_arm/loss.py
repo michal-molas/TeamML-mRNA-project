@@ -42,6 +42,12 @@ def _masked_log_softmax(logits, valid_mask):
     return F.log_softmax(masked, dim=-1)
 
 
+def _entropy_from_log_probs(log_probs, valid_mask):
+    safe_log_probs = log_probs.masked_fill(~valid_mask, 0.0)
+    probs = log_probs.exp().masked_fill(~valid_mask, 0.0)
+    return -(probs * safe_log_probs).sum(dim=-1)
+
+
 def _log_prob_prefix(static_logits, permutations, n_previous):
     if n_previous <= 0:
         return torch.zeros(static_logits.size(0), device=static_logits.device)
@@ -78,7 +84,13 @@ def _exact_f_term(model, batch, permutations, n_previous, q_logits, mask_id):
     log_p_value = log_p_values_all.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
 
     term = log_p_order + log_p_value - log_q
-    return (q_probs * term.masked_fill(~remaining, 0.0)).sum(dim=-1)
+    f_term = (q_probs * term.masked_fill(~remaining, 0.0)).sum(dim=-1)
+    stats = {
+        "order_entropy": _entropy_from_log_probs(log_p_order, remaining),
+        "posterior_entropy": _entropy_from_log_probs(log_q, remaining),
+        "value_nll": -(q_probs * log_p_value.masked_fill(~remaining, 0.0)).sum(dim=-1),
+    }
+    return f_term, stats
 
 
 def compute_lo_arm_loss(model, batch, mask_id, n_previous=None):
@@ -102,8 +114,8 @@ def compute_lo_arm_loss(model, batch, mask_id, n_previous=None):
     perm_1 = gumbel_topk_permutation(q_logits).detach()
     perm_2 = gumbel_topk_permutation(q_logits).detach()
 
-    f_1 = _exact_f_term(model, batch, perm_1, n_previous, q_logits, mask_id)
-    f_2 = _exact_f_term(model, batch, perm_2, n_previous, q_logits, mask_id)
+    f_1, stats_1 = _exact_f_term(model, batch, perm_1, n_previous, q_logits, mask_id)
+    f_2, stats_2 = _exact_f_term(model, batch, perm_2, n_previous, q_logits, mask_id)
 
     log_q_1 = _log_prob_prefix(q_logits, perm_1, n_previous)
     log_q_2 = _log_prob_prefix(q_logits, perm_2, n_previous)
@@ -113,9 +125,19 @@ def compute_lo_arm_loss(model, batch, mask_id, n_previous=None):
 
     with torch.no_grad():
         negative_elbo = -(0.5 * target_len * (f_1 + f_2)).mean()
+        order_entropy = 0.5 * (
+            stats_1["order_entropy"].mean() + stats_2["order_entropy"].mean()
+        )
+        posterior_entropy = 0.5 * (
+            stats_1["posterior_entropy"].mean() + stats_2["posterior_entropy"].mean()
+        )
+        value_nll = 0.5 * (stats_1["value_nll"].mean() + stats_2["value_nll"].mean())
 
     return {
         "loss": loss,
         "negative_elbo": negative_elbo,
+        "order_entropy": order_entropy,
+        "posterior_entropy": posterior_entropy,
+        "value_nll": value_nll,
         "n_previous": n_previous,
     }

@@ -42,6 +42,36 @@ def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
+def _depth_buckets(target_len):
+    max_previous = max(target_len - 1, 0)
+    candidates = [
+        0,
+        round(0.25 * max_previous),
+        round(0.50 * max_previous),
+        round(0.75 * max_previous),
+        max_previous,
+    ]
+    buckets = []
+    for depth in candidates:
+        depth = int(depth)
+        if depth not in buckets:
+            buckets.append(depth)
+    return buckets
+
+
+def _mean_or_nan(total, count):
+    if count == 0:
+        return float("nan")
+    return total / count
+
+
+def _grad_norm(parameters):
+    grads = [p.grad.detach().norm(2) for p in parameters if p.grad is not None]
+    if not grads:
+        return torch.tensor(0.0)
+    return torch.stack(grads).norm(2)
+
+
 @torch.no_grad()
 def validate(
     model,
@@ -53,10 +83,16 @@ def validate(
     world_size=1,
     distributed=False,
     max_batches=None,
+    estimates_per_batch=2,
 ):
     model.eval()
-    loss_sum = 0.0
-    count = 0
+    metric_names = ["negative_elbo", "order_entropy", "posterior_entropy", "value_nll"]
+    depths = _depth_buckets(dataset.target_len)
+    totals = {
+        depth: {metric_name: 0.0 for metric_name in metric_names}
+        for depth in depths
+    }
+    counts = {depth: 0 for depth in depths}
 
     indices = list(range(rank, len(dataset), world_size))
     if max_batches is not None:
@@ -70,20 +106,77 @@ def validate(
         if not samples:
             continue
         batch = _samples_to_batch(samples, device)
-        metrics = compute_lo_arm_loss(model, batch, mask_id)
         batch_count = batch["target_ids"].size(0)
-        loss_sum += float(metrics["negative_elbo"].item()) * batch_count
-        count += batch_count
+        for depth in depths:
+            for _ in range(estimates_per_batch):
+                metrics = compute_lo_arm_loss(model, batch, mask_id, n_previous=depth)
+                for metric_name in metric_names:
+                    totals[depth][metric_name] += (
+                        float(metrics[metric_name].item()) * batch_count
+                    )
+                counts[depth] += batch_count
 
     if distributed:
-        totals = torch.tensor([loss_sum, float(count)], device=device)
-        dist.all_reduce(totals, op=dist.ReduceOp.SUM)
-        loss_sum, count = totals[0].item(), int(totals[1].item())
+        reduced_values = []
+        for depth in depths:
+            for metric_name in metric_names:
+                reduced_values.append(totals[depth][metric_name])
+            reduced_values.append(float(counts[depth]))
+        reduced = torch.tensor(reduced_values, device=device)
+        dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+        offset = 0
+        for depth in depths:
+            for metric_name in metric_names:
+                totals[depth][metric_name] = reduced[offset].item()
+                offset += 1
+            counts[depth] = int(reduced[offset].item())
+            offset += 1
 
     model.train()
-    if count == 0:
-        return float("nan")
-    return loss_sum / count
+    by_depth = {
+        depth: {
+            metric_name: _mean_or_nan(totals[depth][metric_name], counts[depth])
+            for metric_name in metric_names
+        }
+        for depth in depths
+    }
+    overall = {}
+    total_count = sum(counts.values())
+    for metric_name in metric_names:
+        metric_total = sum(totals[depth][metric_name] for depth in depths)
+        overall[metric_name] = _mean_or_nan(metric_total, total_count)
+
+    return {
+        **overall,
+        "negative_elbo_by_depth": {
+            depth: by_depth[depth]["negative_elbo"] for depth in depths
+        },
+        "by_depth": by_depth,
+    }
+
+
+def _wandb_train_metrics(metrics, grad_norm):
+    return {
+        "train/loss": float(metrics["loss"].item()),
+        "train/negative_elbo": float(metrics["negative_elbo"].item()),
+        "train/n_previous": metrics["n_previous"],
+        "train/order_entropy": float(metrics["order_entropy"].item()),
+        "train/posterior_entropy": float(metrics["posterior_entropy"].item()),
+        "train/value_nll": float(metrics["value_nll"].item()),
+        "train/grad_norm": float(grad_norm.item()),
+    }
+
+
+def _wandb_validation_metrics(val_metrics):
+    logs = {
+        "valid/negative_elbo": val_metrics["negative_elbo"],
+        "valid/order_entropy": val_metrics["order_entropy"],
+        "valid/posterior_entropy": val_metrics["posterior_entropy"],
+        "valid/value_nll": val_metrics["value_nll"],
+    }
+    for depth, value in val_metrics["negative_elbo_by_depth"].items():
+        logs[f"valid/negative_elbo_by_depth/{depth}"] = value
+    return logs
 
 
 def _checkpoint_payload(model, config, args, dataset):
@@ -144,6 +237,7 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
 
     best_val = float("inf")
     global_step = 0
+    train_depths = _depth_buckets(train_dataset.target_len)
     for epoch in range(args.epochs):
         model.train()
         loss_sum = 0.0
@@ -166,11 +260,18 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
                 continue
             batch = _samples_to_batch(samples, device)
             optimizer.zero_grad()
-            metrics = compute_lo_arm_loss(model, batch, train_dataset.mask_id)
+            n_previous = train_depths[global_step % len(train_depths)]
+            metrics = compute_lo_arm_loss(
+                model, batch, train_dataset.mask_id, n_previous=n_previous
+            )
             loss = metrics["loss"]
             loss.backward()
             if args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), args.grad_clip
+                )
+            else:
+                grad_norm = _grad_norm(model.parameters())
             optimizer.step()
 
             batch_count = batch["target_ids"].size(0)
@@ -178,14 +279,7 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
             count += batch_count
             global_step += 1
             if args.wandb and wandb is not None and global_step % args.log_every == 0 and rank == 0:
-                wandb.log(
-                    {
-                        "train/loss": float(loss.item()),
-                        "train/negative_elbo": float(metrics["negative_elbo"].item()),
-                        "train/n_previous": metrics["n_previous"],
-                    },
-                    step=global_step,
-                )
+                wandb.log(_wandb_train_metrics(metrics, grad_norm), step=global_step)
 
         if distributed:
             totals = torch.tensor([loss_sum, float(count)], device=device)
@@ -193,7 +287,7 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
             loss_sum, count = totals[0].item(), int(totals[1].item())
 
         train_loss = loss_sum / max(count, 1)
-        val_loss = validate(
+        val_metrics = validate(
             model,
             val_dataset,
             train_dataset.mask_id,
@@ -203,11 +297,16 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
             world_size=world_size,
             distributed=distributed,
             max_batches=args.max_val_batches,
+            estimates_per_batch=args.val_estimates_per_batch,
         )
+        val_loss = val_metrics["negative_elbo"]
         if rank == 0:
             print(f"Epoch {epoch} | train_loss={train_loss:.4f} val_neg_elbo={val_loss:.4f}")
         if args.wandb and wandb is not None and rank == 0:
-            wandb.log({"epoch/train_loss": train_loss, "valid/negative_elbo": val_loss}, step=global_step)
+            wandb.log(
+                {"epoch/train_loss": train_loss, **_wandb_validation_metrics(val_metrics)},
+                step=global_step,
+            )
 
         if args.output_path and val_loss < best_val and rank == 0:
             best_val = val_loss
@@ -277,6 +376,7 @@ def main():
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--max_val_batches", type=int, default=20)
+    parser.add_argument("--val_estimates_per_batch", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb_project", default="lo-arm-pretrain")
