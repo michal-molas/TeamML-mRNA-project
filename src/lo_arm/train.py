@@ -343,11 +343,6 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
             count += batch_count
             global_step += 1
 
-            print(f"Step {global_step}, train metrics:")
-            print(metrics)
-            print(f"Step {global_step}, train log accumulator:")
-            print(train_log_accumulator)
-
             _accumulate_train_log(train_log_accumulator, metrics, grad_norm)
             if args.wandb and wandb is not None and global_step % args.log_every == 0 and rank == 0:
                 wandb.log(_wandb_train_metrics(train_log_accumulator), step=global_step)
