@@ -10,6 +10,7 @@ from torch.optim import AdamW
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data._utils.collate import default_collate
 from tqdm import tqdm
+from dotenv import load_dotenv
 
 try:
     import wandb
@@ -281,6 +282,8 @@ def main():
     parser.add_argument("--wandb_project", default="lo-arm-pretrain")
     parser.add_argument("--log_every", type=int, default=100)
     args = parser.parse_args()
+
+    load_dotenv()
 
     torch.manual_seed(args.seed)
     distributed, rank, world_size, local_rank, device = init_distributed_from_environment()
