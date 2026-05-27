@@ -13,14 +13,39 @@ from tqdm import tqdm
 import wandb
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "RiboNN"))
+from RiboNN.src.model import RiboNN
 from models import MRNACsvDataset, MRNATransformer
-from utils import load_pretrained_weights
-from ribonn_utils import (
-    load_ribonn,
-    RIBONN_CONFIG,
-    build_ribonn_input,
-    ribonn_predict_using_nested_cross_validation_models,
+
+RIBONN_MAX_TX_LEN = 1_381 + 11_937  # 13318
+
+# len_after_conv: sequence length after all 10 conv+pool layers for a 13318-length input.
+# Derivation:
+#   1. initial_conv(k=5,p=0): 13318 -> 13314
+#   2. 10 × (conv(k=5,p=0) + maxpool(2,2)): 13314 -> 13310 -> 6655 -> 6651 -> 3325 -> 3321 -> 1660 -> 1656 -> 828 -> 824 -> 412 -> 408 -> 204 -> 200 -> 100 -> 96 -> 48 -> 44 -> 22 -> 18 -> 9
+RIBONN_LEN_AFTER_CONV = 9
+
+RIBONN_CONFIG = dict(
+    with_NAs=False, # conf.yml
+    split_utr5_cds_utr3_channels=False, # conf.yml
+    label_codons=True, # conf.yml
+    label_utr5=False, # conf.yml
+    label_utr3=False, # conf.yml
+    label_splice_sites=False, # conf.yml
+    label_up_probs=False, # conf.yml
+    filters=64, # conf.yml
+    conv_stride=1, # conf.yml
+    conv_padding=0, # conf.yml
+    ln_epsilon=0.007, # conf.yml
+    dropout=0.3, # conf.yml
+    residual=False, # conf.yml
+    activation = "relu", # Can be also silu/leakyrelu
+    kernel_size=5, # conf.yml
+    num_conv_layers=10, # conf.yml
+    len_after_conv=RIBONN_LEN_AFTER_CONV,
+    num_targets=78,  # 78 for human, 68 for mouse
+    max_shift=0, # conf.yml
+    symmetric_shift=True, # conf.yml
 )
 
 
