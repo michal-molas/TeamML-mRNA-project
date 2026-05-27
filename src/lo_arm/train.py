@@ -11,9 +11,9 @@ try:
 except ImportError:  # pragma: no cover
     wandb = None
 
-from .data import MRNALoArmDataset
-from .loss import compute_lo_arm_loss
-from .model import LoArmConfig, LoArmTransformer
+from data import MRNALoArmDataset
+from loss import compute_lo_arm_loss
+from model import LoArmConfig, LoArmTransformer
 
 
 def _to_device(batch, device):
