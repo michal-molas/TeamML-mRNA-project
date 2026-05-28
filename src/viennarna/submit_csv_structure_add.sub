@@ -1,0 +1,45 @@
+#!/bin/bash
+#SBATCH --account=hai_1223  	 	     
+#SBATCH --cpus-per-task=48
+#SBATCH --gres=gpu:1                  
+#SBATCH --time=6:00:00               
+#SBATCH --partition=booster           
+#SBATCH --job-name=viennarna_convert
+#SBATCH --output=out/output.%j
+#SBATCH --error=err/error.%j
+
+set -euo pipefail
+
+source ../../venv_setup/activate.sh
+
+# full dataset
+INPUT_TR="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/train.csv"
+OUTPUT_TR="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/train_vienna.csv"
+INPUT_TE="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/test.csv"
+OUTPUT_TE="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/test_vienna.csv"
+
+# 200K samples
+# INPUT_TR="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/train_200.csv"
+# OUTPUT_TR="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/train_200_vienna.csv"
+# INPUT_TE="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/test_200.csv"
+# OUTPUT_TE="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/test_200_vienna.csv"
+
+# 200 samples
+# INPUT_TR="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/train_small.csv"
+# OUTPUT_TR="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/train_small_vienna.csv"
+# INPUT_TE="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/test_small.csv"
+# OUTPUT_TE="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/test_small_vienna.csv"
+
+python3 add_structure_to_csv.py \
+  --input "$INPUT_TR" \
+  --output "$OUTPUT_TR" \
+  --workers "$SLURM_CPUS_PER_TASK" \
+  --aug_upstream 50 \
+  --aug_downstream 100
+
+python3 add_structure_to_csv.py \
+  --input "$INPUT_TE" \
+  --output "$OUTPUT_TE" \
+  --workers "$SLURM_CPUS_PER_TASK" \
+  --aug_upstream 50 \
+  --aug_downstream 100

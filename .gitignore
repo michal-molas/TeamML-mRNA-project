@@ -2,6 +2,9 @@ logs
 src/transformer_training/out
 src/transformer_training/err
 src/transformer_training/model_state_dict
+src/viennarna/out
+src/viennarna/err
+src/viennarna/model_state_dict
 data/state_dictionaries
 trash
 *.png

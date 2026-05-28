@@ -1,0 +1,56 @@
+#!/bin/bash -x
+#SBATCH --account=hai_1223
+#SBATCH --job-name=pretrain_fsdp_vienna_grid
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4         # 1 process per GPU
+#SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=12
+#SBATCH --time=12:00:00
+#SBATCH --partition=booster
+#SBATCH --output=out/out_%A_%a.txt
+#SBATCH --error=err/err_%A_%a.txt
+#SBATCH --array=0-8
+
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
+
+# NCCL / distributed
+export MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -n 1)
+export MASTER_PORT=29500
+export NCCL_DEBUG=INFO
+export TORCH_NCCL_BLOCKING_WAIT=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+
+# activate env
+source ../../venv_setup/activate.sh
+
+mfe_weights=(0.005 0.01 0.05)
+paired_weights=(0.02 0.05 0.1)
+
+mfe_idx=$((SLURM_ARRAY_TASK_ID % 3))
+paired_idx=$((SLURM_ARRAY_TASK_ID / 3))
+
+MFE_WEIGHT=${mfe_weights[$mfe_idx]}
+PAIRED_WEIGHT=${paired_weights[$paired_idx]}
+
+RUN_NAME="vienna_mfe${MFE_WEIGHT}_paired${PAIRED_WEIGHT}"
+
+echo "RUN_NAME=$RUN_NAME"
+echo "MFE_WEIGHT=$MFE_WEIGHT, PAIRED_WEIGHT=$PAIRED_WEIGHT"
+
+# run
+time torchrun \
+  --nnodes=$SLURM_JOB_NUM_NODES \
+  --nproc_per_node=4 \
+  --rdzv_id=$SLURM_JOB_ID \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+  pretrain_FSDP.py \
+  --train_csv_path ../../data/pretraining/dataset_with_utr3/train_200_vienna.csv \
+  --test_csv_path ../../data/pretraining/dataset_with_utr3/test_200_vienna.csv \
+  --output_path "model_state_dict/utr53_pretrained_fsdp_${RUN_NAME}.pt" \
+  --paired_generated_only \
+  --mfe_loss_weight ${MFE_WEIGHT} \
+  --paired_loss_weight ${PAIRED_WEIGHT} \
+  --epochs 100 \
+  --wandb
