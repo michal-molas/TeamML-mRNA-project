@@ -1,0 +1,3 @@
+wandb
+python-dotenv
+pytorch_lightning
