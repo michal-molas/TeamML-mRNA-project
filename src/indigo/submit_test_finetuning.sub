@@ -1,15 +1,17 @@
 #!/bin/bash -x
 #SBATCH --account=hai_1223  	 	     # Account details
 #SBATCH --cpus-per-task=12
-#SBATCH --ntasks=4
-#SBATCH --gres=gpu:4                     # 4 GPUs, 1 per task
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1                     # 4 GPUs, 1 per task
 #SBATCH --output=out/output.%j               # File for standard output
 #SBATCH --error=err/error.%j                 # File for standard error
-#SBATCH --time=00:05:00                  # Maximum runtime
+#SBATCH --time=00:10:00                  # Maximum runtime
 #SBATCH --partition=booster              # Specified machine partition
 
 # To get number of cpu per task
 export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
+
+export WANDB_API_KEY="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"
 
 # activate env
 source ../../venv_setup/activate.sh
@@ -19,10 +21,9 @@ time srun python3 finetune.py \
     --csv_path ../../data/finetuning/ribonn/dataset.csv \
     --ribonn_weights_folder ../../data/ribonn_weights/weights/human \
     --lambda_ribonn 0.05 \
-    --gen_order random \
+    --gen_order sao \
     --subset 128 \
-    --debug_steps 10 \
-    --batch_size 2 \
-    --epochs 2 \
+    --batch_size 4 \
+    --epochs 10 \
     --output_path checkpoints/test_model.pth
 
