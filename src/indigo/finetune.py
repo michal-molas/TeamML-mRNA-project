@@ -702,8 +702,8 @@ def main():
     parser = argparse.ArgumentParser()
 
     # data / model
-    # parser.add_argument("--csv_path", type=str, default="../../data/finetuning/ribonn/dataset.csv")
-    parser.add_argument("--csv_path", type=str, default="data/finetuning/ribonn/dataset.csv")
+    parser.add_argument("--csv_path", type=str, default="../../data/finetuning/ribonn/dataset.csv")
+    # parser.add_argument("--csv_path", type=str, default="data/finetuning/ribonn/dataset.csv")
     parser.add_argument("--output_path", type=str, default=None)
 
     parser.add_argument("--n_layers", type=int, default=4)
@@ -744,7 +744,7 @@ def main():
 
     # logging/debug
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--wandb_project", type=str, default="indigo-ribonn-finetune")
+    parser.add_argument("--wandb_project", type=str, default="indigo-finetuning")
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--subset", type=int, default=0,
                         help="If >0, use only first N samples (local sanity run).")
