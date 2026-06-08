@@ -8,6 +8,48 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 
+MRNA_VOCAB = {
+    'A': 0,
+    'U': 1,
+    'T': 1,
+    'C': 2,
+    'G': 3,
+    '<PAD>': 4,
+    '<BOS>': 5,
+    '<EOS>': 6,
+    '<CDS>': 7,
+    '<UTR5>': 8,
+    '<UTR3>': 9,
+}
+
+class MRNATokenizer:
+    def __init__(self, only_utr5=False):
+        self.vocab = MRNA_VOCAB.copy()
+
+        if only_utr5:
+            self.vocab.pop('<UTR3>', None)
+
+        self.id_to_token = {v: k for k, v in self.vocab.items() if k != 'U'}
+
+        self.vocab_size = len(set(self.vocab.values()))
+        self.pad_id = self.vocab['<PAD>']
+        self.bos_id = self.vocab['<BOS>']
+        self.eos_id = self.vocab['<EOS>']
+        self.cds_id = self.vocab['<CDS>']
+        self.utr5_id = self.vocab['<UTR5>']
+        self.utr3_id = self.vocab.get('<UTR3>')
+
+    def tokenize(self, seq):
+        return [self.vocab.get(n, self.pad_id) for n in str(seq).upper()]
+
+    def detokenize(self, token_ids):
+        # ignore special tokens, return only ACTG
+        tokens = [self.id_to_token.get(token_id, '') for token_id in token_ids]
+        chars = [t for t in tokens if t in {'A', 'C', 'G', 'T'}]
+        return ''.join(chars)
+
+
+#TODO: Separate tokenization from the dataset (pass tokenizer object as arg)
 class MRNACsvDataset(Dataset):
     def __init__(
         self,

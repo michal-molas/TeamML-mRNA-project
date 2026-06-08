@@ -1,0 +1,27 @@
+# samples_csv: /Users/pawel/TeamML-mRNA-project/data/generated/transformer_pretrained.csv
+# samples_csv: /Users/pawel/TeamML-mRNA-project/data/generated/transformer_finetuned.csv
+# samples_csv: /Users/pawel/TeamML-mRNA-project/data/generated/indigo_pretrained.csv
+samples_csv: /Users/pawel/TeamML-mRNA-project/data/generated/loarm_pretrained.csv
+# samples_csv: /Users/pawel/TeamML-mRNA-project/data/evals/test_500_pretrained_0423/generated_samples.csv
+
+# eval_dir: /Users/pawel/TeamML-mRNA-project/data/evals/transformer_pretrained
+# eval_dir: /Users/pawel/TeamML-mRNA-project/data/evals/transformer_finetuned
+# eval_dir: /Users/pawel/TeamML-mRNA-project/data/evals/indigo_pretrained
+eval_dir: /Users/pawel/TeamML-mRNA-project/data/evals/loarm_pretrained
+# eval_dir: /Users/pawel/TeamML-mRNA-project/data/evals/reproduce_0423_pretrained
+
+scorers:
+  string_statistics: {}
+  ribonn:
+    # weights_path: ../../RiboNN/models/human/a569cb3e25b24729aa634dfc0c58635c/state_dict.pth
+    weights_folder: ../../RiboNN/models/human
+    top_k_models_to_use: 5
+    # batch_size: 32
+  # utrlm: {}
+  # rnafold: {}
+
+plots:
+  gt_vs_generated_distribution:
+    metrics: {}
+
+# max_samples: 50

@@ -17,7 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "RiboNN"))
 from RiboNN.src.model import RiboNN
 from models import MRNACsvDataset, MRNATransformer
 
-RIBONN_MAX_TX_LEN = 1_381 + 11_937  # 13318
+RIBONN_MAX_UTR5_LEN = 1_381
+RIBONN_MAX_CDS_UTR3_LEN = 11_937
+RIBONN_MAX_TX_LEN = RIBONN_MAX_UTR5_LEN + RIBONN_MAX_CDS_UTR3_LEN  # 13318
 
 # len_after_conv: sequence length after all 10 conv+pool layers for a 13318-length input.
 # Derivation:
@@ -79,12 +81,15 @@ def build_ribonn_input(
     utr3_lens,
     ribonn_max_len,
     label_codons=True,
+    ribonn_max_utr5_len=RIBONN_MAX_UTR5_LEN,
 ):
     """
     Convert LM logits into a RiboNN-compatible tensor via Gumbel-softmax.
 
     Vocab order A=0,U/T=1,C=2,G=3 matches RiboNN channels.
-    RiboNN input layout: [ utr5 | cds | utr3 | padding ]  (zero-padded to ribonn_max_len)
+    RiboNN input layout for pretrained models:
+        [ left padding + utr5 | cds | utr3 + right padding ]
+    The CDS start is aligned at ribonn_max_utr5_len.
     UTR5 is stored reversed in the LM; we flip it back here.
 
     Returns: (N, num_channels, ribonn_max_len)  — channels: A,U/T,C,G [+ codon_label]
@@ -102,12 +107,23 @@ def build_ribonn_input(
         cds_len  = int(cds_lens[i].item())
         utr3_len = int(utr3_lens[i].item())
 
+        if utr5_len > ribonn_max_utr5_len:
+            raise ValueError(
+                f"5' UTR length {utr5_len} exceeds ribonn_max_utr5_len={ribonn_max_utr5_len}."
+            )
+        ribonn_max_cds_utr3_len = ribonn_max_len - ribonn_max_utr5_len
+        if cds_len + utr3_len > ribonn_max_cds_utr3_len:
+            raise ValueError(
+                f"Combined CDS and 3' UTR length {cds_len + utr3_len} exceeds "
+                f"ribonn_max_cds_utr3_len={ribonn_max_cds_utr3_len}."
+            )
+
         # UTR5
         utr5_start = 2 + cds_len + 1 # after <BOS>, <CDS>, CDS tokens and <UTR5>
         utr5_end = utr5_start + utr5_len
 
-        utr5_out_start = 0
-        utr5_out_end = utr5_len
+        utr5_out_start = ribonn_max_utr5_len - utr5_len
+        utr5_out_end = ribonn_max_utr5_len
         out[i, :4, utr5_out_start:utr5_out_end] = soft_nt[i, utr5_start:utr5_end].flip(0).T
 
         # CDS (Here we use one-hot encoding instead of Gumbel-softmax)
@@ -115,16 +131,16 @@ def build_ribonn_input(
         cds_end = cds_start + cds_len
 
         cds_tokens = input_ids[i, cds_start:cds_end]
-        cds_out_start = utr5_len
-        cds_out_end = utr5_len + cds_len
+        cds_out_start = ribonn_max_utr5_len
+        cds_out_end = ribonn_max_utr5_len + cds_len
         out[i, :4, cds_out_start:cds_out_end] = F.one_hot(cds_tokens, 4).float().T
 
         # UTR3
         utr3_start = 2 + cds_len + 1 + utr5_len + 1 # after <BOS>, <CDS>, CDS tokens, <UTR5>, UTR5 tokens and <UTR3> token 
         utr3_end = utr3_start + utr3_len
 
-        utr3_out_start = utr5_len + cds_len
-        utr3_out_end = utr5_len + cds_len + utr3_len
+        utr3_out_start = ribonn_max_utr5_len + cds_len
+        utr3_out_end = ribonn_max_utr5_len + cds_len + utr3_len
         out[i, :4, utr3_out_start:utr3_out_end] = soft_nt[i, utr3_start:utr3_end].T
 
         # Codon-label channel
@@ -159,7 +175,7 @@ def ribonn_predict_using_nested_cross_validation_models(args, device, ribonn_inp
         ).reset_index(drop=True)
 
         ## RiboNN.src.predict.predict_using_models_trained_in_one_fold() ##
-        top_k_models_to_use = 5
+        top_k_models_to_use = getattr(args, "top_k_models_to_use", 5)
         sub_run_df = sub_run_df.sort_values("metrics.val_r2", ascending=False).head(top_k_models_to_use)
 
         for run_id in sub_run_df.run_id:
@@ -180,6 +196,7 @@ def train(args, device):
         max_utr5_len=args.max_utr5_len,
         max_cds_len=args.max_cds_len,
         max_utr3_len=args.max_utr3_len,
+        k=1, # set this as default to match pretrained, TODO: pass as param
     )
 
     dataset_size = len(dataset)

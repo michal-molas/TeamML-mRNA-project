@@ -1,0 +1,23 @@
+#!/bin/bash -x
+#SBATCH --account=hai_1223  	 	     # Account details
+#SBATCH --cpus-per-task=48
+#SBATCH --gres=gpu:1                     # Use the 1 GPU available
+#SBATCH --output=out/output.%j               # File for standard output
+#SBATCH --error=err/error.%j                 # File for standard error
+#SBATCH --time=00:30:00                  # Maximum runtime
+#SBATCH --partition=booster              # Specified machine partition
+
+# To get number of cpu per task
+export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
+
+# activate env
+source ../../venv_setup/activate.sh
+
+# run script
+srun python3 generate_samples.py \
+    transformer \  # model type
+    ../../data/models/utr53_pretrained.pt \  # checkpoint path
+    ../../data/pretraining/small_test.csv \  # input csv path
+    generated_samples.csv \  # output csv path
+    --samples_per_cds 3 \
+    --max_samples 20 \  # optional: limit number of samples to generate
