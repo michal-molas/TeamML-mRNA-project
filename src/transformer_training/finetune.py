@@ -153,68 +153,6 @@ def build_ribonn_input(
     return out  # (N, num_channels, ribonn_max_len)
 
 
-def ribonn_input_from_string(
-    utr5: str,
-    cds: str,
-    utr3: str,
-    ribonn_max_len: int,
-    label_codons: bool = True,
-    ribonn_max_utr5_len: int = RIBONN_MAX_UTR5_LEN,
-) -> torch.Tensor:
-    """Convert sequence strings into the start-codon-aligned RiboNN input layout."""
-    utr5 = str(utr5).strip().upper().replace("U", "T")
-    cds = str(cds).strip().upper().replace("U", "T")
-    utr3 = str(utr3).strip().upper().replace("U", "T")
-    cds_utr3_len = len(cds) + len(utr3)
-
-    if len(utr5) + cds_utr3_len > ribonn_max_len:
-        raise ValueError(
-            f"Sequence length {len(utr5) + cds_utr3_len} exceeds ribonn_max_len={ribonn_max_len}. "
-            f"Lengths: utr5={len(utr5)}, cds={len(cds)}, utr3={len(utr3)}"
-        )
-    if len(utr5) > ribonn_max_utr5_len:
-        raise ValueError(
-            f"5' UTR length {len(utr5)} exceeds ribonn_max_utr5_len={ribonn_max_utr5_len}."
-        )
-    ribonn_max_cds_utr3_len = ribonn_max_len - ribonn_max_utr5_len
-    if cds_utr3_len > ribonn_max_cds_utr3_len:
-        raise ValueError(
-            f"Combined CDS and 3' UTR length {cds_utr3_len} exceeds "
-            f"ribonn_max_cds_utr3_len={ribonn_max_cds_utr3_len}."
-        )
-    if len(cds) % 3 != 0:
-        raise ValueError("CDS length must be a multiple of 3.")
-    if cds[-3:] not in ("TAA", "TGA", "TAG"):
-        raise ValueError("CDS sequence must end with a stop codon.")
-
-    num_channels = 5 if label_codons else 4
-    out = torch.zeros(num_channels, ribonn_max_len, dtype=torch.float32)
-    nt_to_idx = {"A": 0, "T": 1, "C": 2, "G": 3}
-
-    utr5_start = ribonn_max_utr5_len - len(utr5)
-    cds_start = ribonn_max_utr5_len
-    utr3_start = ribonn_max_utr5_len + len(cds)
-    for section_start, section_seq in (
-        (utr5_start, utr5),
-        (cds_start, cds),
-        (utr3_start, utr3),
-    ):
-        for offset, nt in enumerate(section_seq):
-            try:
-                out[nt_to_idx[nt], section_start + offset] = 1.0
-            except KeyError:
-                raise ValueError(
-                    f"Invalid nucleotide {nt!r} at position {section_start + offset}. "
-                    "Allowed nucleotides: A, U, T, C, G."
-                )
-
-    if label_codons:
-        for codon_pos in range(cds_start, cds_start + len(cds), 3):
-            out[4, codon_pos] = 1.0
-
-    return out
-
-
 def load_pretrained_weights(model, checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
