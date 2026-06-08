@@ -196,6 +196,7 @@ def train(args, device):
         max_utr5_len=args.max_utr5_len,
         max_cds_len=args.max_cds_len,
         max_utr3_len=args.max_utr3_len,
+        k=1, # set this as default to match pretrained, TODO: pass as param
     )
 
     dataset_size = len(dataset)
