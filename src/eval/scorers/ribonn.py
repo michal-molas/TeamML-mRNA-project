@@ -12,9 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "transformer_traini
 from finetune import (
     RIBONN_CONFIG,
     RIBONN_MAX_TX_LEN,
+    RIBONN_MAX_UTR5_LEN,
     load_ribonn,
     ribonn_predict_using_nested_cross_validation_models,
 )
+
 
 
 def ribonn_input_from_string(
@@ -23,63 +25,61 @@ def ribonn_input_from_string(
     utr3: str,
     ribonn_max_len: int,
     label_codons: bool = True,
+    ribonn_max_utr5_len: int = RIBONN_MAX_UTR5_LEN,
 ) -> torch.Tensor:
-    """
-    Convert sequence strings into a RiboNN-compatible tensor.
+    """Convert sequence strings into the start-codon-aligned RiboNN input layout."""
+    utr5 = str(utr5).strip().upper().replace("U", "T")
+    cds = str(cds).strip().upper().replace("U", "T")
+    utr3 = str(utr3).strip().upper().replace("U", "T")
+    cds_utr3_len = len(cds) + len(utr3)
 
-    Vocab/channel order:
-        A = 0
-        U/T = 1
-        C = 2
-        G = 3
-
-    RiboNN input layout:
-        [ utr5 | cds | utr3 | padding ]
-
-    Returns:
-        Tensor of shape (num_channels, ribonn_max_len)
-        where num_channels = 4 or 5 if label_codons=True.
-    """
-    seq = utr5 + cds + utr3
-    total_len = len(seq)
-
-    if total_len > ribonn_max_len:
+    if len(utr5) + cds_utr3_len > ribonn_max_len:
         raise ValueError(
-            f"Sequence length {total_len} exceeds ribonn_max_len={ribonn_max_len}. "
+            f"Sequence length {len(utr5) + cds_utr3_len} exceeds ribonn_max_len={ribonn_max_len}. "
             f"Lengths: utr5={len(utr5)}, cds={len(cds)}, utr3={len(utr3)}"
         )
+    if len(utr5) > ribonn_max_utr5_len:
+        raise ValueError(
+            f"5' UTR length {len(utr5)} exceeds ribonn_max_utr5_len={ribonn_max_utr5_len}."
+        )
+    ribonn_max_cds_utr3_len = ribonn_max_len - ribonn_max_utr5_len
+    if cds_utr3_len > ribonn_max_cds_utr3_len:
+        raise ValueError(
+            f"Combined CDS and 3' UTR length {cds_utr3_len} exceeds "
+            f"ribonn_max_cds_utr3_len={ribonn_max_cds_utr3_len}."
+        )
+    if len(cds) % 3 != 0:
+        raise ValueError("CDS length must be a multiple of 3.")
+    if cds[-3:] not in ("TAA", "TGA", "TAG"):
+        raise ValueError("CDS sequence must end with a stop codon.")
 
     num_channels = 5 if label_codons else 4
     out = torch.zeros(num_channels, ribonn_max_len, dtype=torch.float32)
+    nt_to_idx = {"A": 0, "T": 1, "C": 2, "G": 3}
 
-    nt_to_idx = {
-        "A": 0,
-        "U": 1,
-        "T": 1,
-        "C": 2,
-        "G": 3,
-    }
-
-    for pos, nt in enumerate(seq.upper()):
-        try:
-            channel = nt_to_idx[nt]
-        except KeyError:
-            raise ValueError(
-                f"Invalid nucleotide {nt!r} at position {pos}. "
-                "Allowed nucleotides: A, U, T, C, G."
-            )
-
-        out[channel, pos] = 1.0
+    utr5_start = ribonn_max_utr5_len - len(utr5)
+    cds_start = ribonn_max_utr5_len
+    utr3_start = ribonn_max_utr5_len + len(cds)
+    for section_start, section_seq in (
+        (utr5_start, utr5),
+        (cds_start, cds),
+        (utr3_start, utr3),
+    ):
+        for offset, nt in enumerate(section_seq):
+            try:
+                out[nt_to_idx[nt], section_start + offset] = 1.0
+            except KeyError:
+                raise ValueError(
+                    f"Invalid nucleotide {nt!r} at position {section_start + offset}. "
+                    "Allowed nucleotides: A, U, T, C, G."
+                )
 
     if label_codons:
-        cds_start = len(utr5)
-        cds_end = len(utr5) + len(cds)
-
-        # Label every first nucleotide of a codon inside CDS only
-        for codon_pos in range(cds_start, cds_end, 3):
+        for codon_pos in range(cds_start, cds_start + len(cds), 3):
             out[4, codon_pos] = 1.0
 
     return out
+
 
 
 class RiboNNScorer(Scorer):
@@ -189,7 +189,6 @@ class RiboNNScorer(Scorer):
         scores = pd.DataFrame(
             {
                 "ribonn_te": predictions.mean(dim=1).cpu().numpy(),
-            },
-            index=df.index,
+            }
         )
         return pd.concat([df[index_cols].reset_index(drop=True), scores], axis=1)

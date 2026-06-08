@@ -40,7 +40,7 @@ def main() -> None:
     subprocess.run(
         [
             sys.executable,
-            "src/eval/score_sequences.py",
+            "score_sequences.py",
             "--config",
             str(config_path),
             "--eval_dir",
@@ -52,7 +52,7 @@ def main() -> None:
     subprocess.run(
         [
             sys.executable,
-            "src/eval/calculate_statistics.py",
+            "calculate_statistics.py",
             "--config",
             str(config_path),
             "--scores_csv",

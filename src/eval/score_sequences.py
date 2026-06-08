@@ -1,8 +1,10 @@
 import argparse
 import os
 import yaml
+from math import ceil
 
 import pandas as pd
+from tqdm import tqdm
 
 import scorers
 
@@ -18,6 +20,8 @@ SCORERS = {
     "rnafold": scorers.RNAfoldScorer,
     "utrlm": scorers.UTRLMScorer,
 }
+
+RIBONN_BATCH_SIZE = 16
 
 
 def _save_scores(scores_df: pd.DataFrame, save_dir: str) -> None:
@@ -99,17 +103,41 @@ def main() -> None:
     if samples_csv is None:
         raise ValueError("No samples CSV provided. Please specify --samples_csv or include it in the config file.")
 
-    raw_samples_df = _load_samples(samples_csv, max_samples=args.max_samples)
+    max_samples = args.max_samples or config.get("max_samples")
+    print(f"Using samples CSV: {samples_csv} with max_samples={max_samples}")
+
+    raw_samples_df = _load_samples(samples_csv, max_samples)
     samples_df = _sanitize_samples_df(raw_samples_df)
 
     scorers_list: list[scorers.Scorer] = _load_scorers(config.get("scorers", {}))
-
     scores_dfs: dict[str, pd.DataFrame] = {}
 
     for scorer in scorers_list:
         print(f"Scoring with {scorer.name}...")
-        scores_df = scorer.score_df(samples_df, index_cols=INDEX_COLS, progress_bar=True)
-        scores_dfs[scorer.name] = _with_index_cols(scores_df, samples_df)
+
+        if scorer.name == "RiboNN":
+            print("Doing batched scoring for RiboNN...")
+
+            batch_scores = []
+            n_batches = ceil(len(samples_df) / RIBONN_BATCH_SIZE)
+            iterator = enumerate(range(0, len(samples_df), RIBONN_BATCH_SIZE), start=1)
+
+            for batch_idx, start in tqdm(iterator, total=n_batches, desc=f"Scoring with {scorer.name}"):
+                # print(f"Scoring batch {batch_idx}/{n_batches} (samples {start} to {min(start + RIBONN_BATCH_SIZE, len(samples_df)) - 1})...")
+
+                scores_batch_df = scorer.score_df(
+                    samples_df.iloc[start:start + RIBONN_BATCH_SIZE],
+                    index_cols=INDEX_COLS,
+                    progress_bar=True,
+                )
+
+                batch_scores.append(scores_batch_df)
+
+            scores_df = pd.concat(batch_scores, ignore_index=True)
+            scores_dfs[scorer.name] = _with_index_cols(scores_df, samples_df)
+        else:
+            scores_df = scorer.score_df(samples_df, index_cols=INDEX_COLS, progress_bar=True)
+            scores_dfs[scorer.name] = _with_index_cols(scores_df, samples_df)
 
     # Merge all scores into a single DataFrame
     final_scores_df = samples_df[INDEX_COLS].copy()
