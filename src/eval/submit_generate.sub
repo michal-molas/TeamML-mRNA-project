@@ -1,0 +1,32 @@
+#!/bin/bash -x
+#SBATCH --account=hai_1223  	 	     # Account details
+#SBATCH --cpus-per-task=48
+#SBATCH --gres=gpu:1                     # Use the 1 GPU available
+#SBATCH --output=out/output.%j               # File for standard output
+#SBATCH --error=err/error.%j                 # File for standard error
+#SBATCH --time=02:00:00                  # Maximum runtime
+#SBATCH --partition=booster              # Specified machine partition
+
+# To get number of cpu per task
+export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
+
+# activate env
+source ../../venv_setup/activate.sh
+
+TRANSFORMER_PRETRAINED="/p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/models/utr53_pretrained.pt"
+TRANSFORMER_FINETUNED="/p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/models/finetuning_checkpoint_0608_30e.pt"
+INDIGO_PRETRAINED="/p/home/jusers/olejnik1/juwels/olejnik1/TeamML-mRNA-project/data/models/indigo_pretrain.pt"
+INDIGO_FINETUNED="/p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/models/finetuning_checkpoint_0608_30e.pt"
+LOARM_PRETRAINED="/p/home/jusers/olejnik1/juwels/olejnik1/TeamML-mRNA-project/data/models/lo_arm_pretrained2.pt"
+
+INPUT_PATH="../../data/pretraining/small_test.csv"
+OUTPUT_PATH="../../data/generated/generated_samples.csv"
+
+# run script
+srun python3 generate_samples.py \
+    transformer \
+    "$TRANSFORMER_PRETRAINED" \
+    "$INPUT_PATH" \
+    "$OUTPUT_PATH" \
+    --samples_per_cds 3 \
+    --max_samples 20 \
