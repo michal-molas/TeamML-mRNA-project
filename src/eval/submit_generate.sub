@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1                     # Use the 1 GPU available
 #SBATCH --output=out/output.%j               # File for standard output
 #SBATCH --error=err/error.%j                 # File for standard error
-#SBATCH --time=00:30:00                  # Maximum runtime
+#SBATCH --time=02:00:00                  # Maximum runtime
 #SBATCH --partition=booster              # Specified machine partition
 
 # To get number of cpu per task

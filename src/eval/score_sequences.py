@@ -12,13 +12,13 @@ import scorers
 INDEX_COLS = ["id", "sample"]
 SEQUENCE_COLS = ["utr5", "cds", "utr3"]
 
-EVAL_DIR = "data/evals"
+EVAL_DIR = "../../data/evals"
 
 SCORERS = {
     "string_statistics": scorers.StringStatisticsScorer,
     "ribonn": scorers.RiboNNScorer,
     "rnafold": scorers.RNAfoldScorer,
-    "utrlm": scorers.UTRLMScorer,
+    # "utrlm": scorers.UTRLMScorer,
 }
 
 RIBONN_BATCH_SIZE = 16

@@ -13,3 +13,4 @@ lightning-utilities
 torchmetrics
 scikit-learn
 openpyxl
+ViennaRNA
