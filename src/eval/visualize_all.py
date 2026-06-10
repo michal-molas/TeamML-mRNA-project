@@ -4,6 +4,9 @@ import os
 import math
 import random
 import numpy as np
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import seaborn as sns
@@ -17,19 +20,63 @@ def parse_args():
     parser.add_argument("--resolution", type=int, default=100)
     return parser.parse_args()
 
+
+def infer_order_format(item):
+    order_format = item.get("order_format")
+    if order_format:
+        return order_format
+
+    model_type = str(item.get("model_type", "")).lower().replace("-", "")
+    if model_type == "loarm":
+        return "step_to_position"
+    return "position_to_step"
+
+
+def normalize_generation_order(item):
+    raw_order = [int(position) for position in item["generation_order"]]
+    seq_len = int(item.get("sequence_length", len(raw_order)))
+    seq_len = max(0, min(seq_len, len(raw_order)))
+    if seq_len == 0:
+        return [], 0
+
+    order_format = infer_order_format(item)
+    if order_format == "position_to_step":
+        step_to_position = [None] * seq_len
+        for position, step in enumerate(raw_order[:seq_len]):
+            if 0 <= step < seq_len and step_to_position[step] is None:
+                step_to_position[step] = position
+        if any(position is None for position in step_to_position):
+            return [], 0
+        order = step_to_position
+    elif order_format == "step_to_position":
+        order = raw_order[:seq_len]
+    else:
+        raise ValueError(f"Unsupported order_format={order_format!r}")
+
+    if any(position < 0 or position >= seq_len for position in order):
+        return [], 0
+    return order, seq_len
+
+
+def get_utr5_token_length(item, utr5_lengths):
+    value = item.get("utr5_token_length")
+    if value is not None:
+        return int(value)
+    return utr5_lengths.get(str(item["id"]))
+
+
 def plot_2d_evolution(data, output_dir, res):
     all_matrices = []
     for item in data:
-        seq_len = item["sequence_length"]
-        order = item["generation_order"]
+        order, seq_len = normalize_generation_order(item)
         if seq_len < 10:
             continue
         state_matrix = np.zeros((seq_len, seq_len))
         for step in range(seq_len):
             if step > 0:
                 state_matrix[step] = state_matrix[step-1]
-            pos_generated = order[step]
-            if pos_generated < seq_len:
+            if step < len(order):
+                pos_generated = order[step]
                 state_matrix[step, pos_generated] = 1.0
         y_indices = np.linspace(0, seq_len - 1, res).astype(int)
         x_indices = np.linspace(0, seq_len - 1, res).astype(int)
@@ -52,12 +99,11 @@ def plot_regional_trajectory(data, utr5_lengths, output_dir, res):
     l3_curves, m3_curves, r3_curves = [], [], []
 
     for item in data:
-        seq_len = item["sequence_length"]
-        order = item["generation_order"]
-        if seq_len < 10 or item["id"] not in utr5_lengths:
+        order, seq_len = normalize_generation_order(item)
+        u5_len = get_utr5_token_length(item, utr5_lengths)
+        if seq_len < 10 or u5_len is None:
             continue
 
-        u5_len = utr5_lengths[item["id"]]
         u3_len = seq_len - u5_len
 
         if u5_len < 5 or u3_len < 5:
@@ -81,19 +127,20 @@ def plot_regional_trajectory(data, utr5_lengths, output_dir, res):
         t_l3, t_m3, t_r3 = [], [], []
 
         for step in range(seq_len):
-            pos = order[step]
-            if pos < l5_bnd:
-                c_l5 += 1
-            elif pos < r5_bnd:
-                c_m5 += 1
-            elif pos < u5_len:
-                c_r5 += 1
-            elif pos < l3_bnd:
-                c_l3 += 1
-            elif pos < r3_bnd:
-                c_m3 += 1
-            elif pos < seq_len:
-                c_r3 += 1
+            if step < len(order):
+                pos = order[step]
+                if pos < l5_bnd:
+                    c_l5 += 1
+                elif pos < r5_bnd:
+                    c_m5 += 1
+                elif pos < u5_len:
+                    c_r5 += 1
+                elif pos < l3_bnd:
+                    c_l3 += 1
+                elif pos < r3_bnd:
+                    c_m3 += 1
+                elif pos < seq_len:
+                    c_r3 += 1
 
             t_l5.append(c_l5 / tot_l5)
             t_m5.append(c_m5 / tot_m5)
@@ -142,30 +189,34 @@ def plot_regional_trajectory(data, utr5_lengths, output_dir, res):
     plt.close()
 
 def create_multi_generation_animation(data, utr5_lengths, output_dir):
-    valid_items = [item for item in data if item["sequence_length"] >= 10 and item["id"] in utr5_lengths]
+    valid_items = []
+    for item in data:
+        order, seq_len = normalize_generation_order(item)
+        if seq_len >= 10 and get_utr5_token_length(item, utr5_lengths) is not None:
+            valid_items.append((item, order, seq_len))
+
     if len(valid_items) < 12:
+        print(f"Not enough valid sequences for animation (found {len(valid_items)}, need at least 12). Skipping animation.")
         return
         
     # Sort sequences by descending length
-    valid_items.sort(key=lambda x: x["sequence_length"], reverse=True)
+    valid_items.sort(key=lambda x: x[2], reverse=True)
     
     # Grab 12 evenly spaced percentiles to show a perfect distribution of lengths
     idx_step = len(valid_items) / 12
     selected_items = [valid_items[int(i * idx_step)] for i in range(12)]
     
-    # Adjusted to fit your k=3 maximum sequence length of ~136
-    max_arena_len = 135
+    max_arena_len = max(seq_len for _, _, seq_len in selected_items)
     
     fig, axes = plt.subplots(6, 2, figsize=(16, 11), sharex='col')
     axes_flat = axes.flatten()
     display_grids = [np.zeros((1, max_arena_len)) for _ in range(12)]
     ims = []
-    max_steps = max(item["sequence_length"] for item in selected_items)
+    max_steps = max(seq_len for _, _, seq_len in selected_items)
     
     for idx, ax in enumerate(axes_flat):
-        item = selected_items[idx]
-        seq_len = item["sequence_length"]
-        u5_len = utr5_lengths[item["id"]]
+        item, _, seq_len = selected_items[idx]
+        u5_len = get_utr5_token_length(item, utr5_lengths)
         
         display_grids[idx][0, seq_len:] = -0.3
         im = ax.imshow(display_grids[idx], cmap="Blues", vmin=-0.5, vmax=1.0, aspect="auto")
@@ -184,12 +235,10 @@ def create_multi_generation_animation(data, utr5_lengths, output_dir):
     axes[-1, 1].set_xlabel("Target Sequence Token Index Position")
     suptitle = fig.suptitle("Parallel Generation Progress (Step: 0)", fontsize=14, weight="bold")
     plt.tight_layout()
-    
+
     def update(frame):
         for idx in range(12):
-            item = selected_items[idx]
-            order = item["generation_order"]
-            seq_len = item["sequence_length"]
+            item, order, seq_len = selected_items[idx]
             if frame > 0 and (frame - 1) < seq_len:
                 pos = order[frame - 1]
                 if pos < seq_len and pos < max_arena_len:
