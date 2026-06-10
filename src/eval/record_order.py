@@ -309,6 +309,19 @@ def token_count(dataset, seq, reverse=False, max_len=None):
     return len(tokenize(seq))
 
 
+def special_token_metadata(dataset):
+    tokens = {
+        "<PAD>": dataset.pad_id,
+        "<BOS>": dataset.bos_id,
+        "<EOS>": dataset.eos_id,
+        "<CDS>": dataset.cds_id,
+        "<UTR5>": dataset.utr5_id,
+        "<UTR3>": getattr(dataset, "utr3_id", None),
+        "<MASK>": getattr(dataset, "mask_id", None),
+    }
+    return {name: int(token_id) for name, token_id in tokens.items() if token_id is not None}
+
+
 def run_indigo(args, checkpoint, device):
     model = load_indigo_checkpoint(checkpoint, device)
     dataset = MRNACsvDataset(args.input_csv, **indigo_dataset_kwargs(args))
@@ -339,6 +352,7 @@ def run_indigo(args, checkpoint, device):
             "generation_order": order,
             "utr5_token_length": token_count(dataset, row.get("utr5", ""), reverse=True, max_len=dataset.max_utr5_len),
             "utr3_token_length": token_count(dataset, row.get("utr3", ""), max_len=dataset.max_utr3_len),
+            "special_tokens": special_token_metadata(dataset),
         })
     return results
 
@@ -371,6 +385,7 @@ def run_loarm(args, checkpoint, device):
             "target_ids": target_ids,
             "utr5_token_length": token_count(dataset, sample["utr5"], reverse=True, max_len=dataset.max_utr5_len),
             "utr3_token_length": token_count(dataset, sample["utr3"], max_len=dataset.max_utr3_len),
+            "special_tokens": special_token_metadata(dataset),
         })
     return results
 
