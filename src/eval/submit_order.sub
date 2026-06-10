@@ -14,8 +14,14 @@ source ../../venv_setup/activate.sh
 # Add the repository root directory to Python's search path
 export PYTHONPATH="${PYTHONPATH}:../../"
 
+INDIGO_CHECKPOINT="../../data/models/indigo_pretrain.pt"
+LOARM_CHECKPOINT="../../data/models/lo_arm_pretrained.pt"
+
+INPUT_CSV="../../data/pretraining/dataset_with_utr3/test.csv"
+OUTPUT_JSON="../../data/generated/generation_orders.json"
+
 srun python3 record_order.py \
-    --checkpoint_path "../../data/models/indigo_pretrain.pt" \
-    --input_csv "../../data/pretraining/dataset_with_utr3/test.csv" \
-    --output_json "../../data/generated/generation_orders.json" \
+    --checkpoint_path "$INDIGO_CHECKPOINT" \
+    --input_csv "$INPUT_CSV" \
+    --output_json "$OUTPUT_JSON" \
     --samples 1000
