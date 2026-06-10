@@ -1,10 +1,10 @@
-# samples_csv: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/generated/20260609/transformer_pretrained.csv
+samples_csv: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/generated/20260609/transformer_pretrained.csv
 # samples_csv: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/generated/20260609/transformer_finetuned.csv
 # samples_csv: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/generated/20260609/indigo_pretrained.csv
 # samples_csv: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/generated/20260609/indigo_finetuned.csv
 # samples_csv: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/generated/20260609/loarm_pretrained.csv
 
-# eval_dir: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/evals/20260609/transformer_pretrained
+eval_dir: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/evals/20260609/transformer_pretrained
 # eval_dir: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/evals/20260609/transformer_finetuned
 # eval_dir: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/evals/20260609/indigo_pretrained
 # eval_dir: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/evals/20260609/indigo_finetuned
