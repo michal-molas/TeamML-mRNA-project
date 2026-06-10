@@ -30,7 +30,13 @@ time torchrun \
   --rdzv_id=$SLURM_JOB_ID \
   --rdzv_backend=c10d \
   --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
-  pretrain_FSDP.py \
-  --wandb \
-  --output_path model_state_dict/utr53_pretrained_fsdp.pt \
-  --epochs 40
+  pretrain.py \
+    --wandb \
+    --gen_order sao \
+    --sao_beam_size 2 \
+    --sao_tokens_per_step 10 \
+    --epochs 10 \
+    --n_heads 8 \
+    --learning_rate 3e-4 \
+    --output_path ./model_state_dict/dist_indigo_pre_8heads_3e-4lr_2bs_step2.pt \
+    --checkpoint_path ./model_state_dict/dist_indigo_pre_8heads_3e-4lr_2bs.pt

@@ -16,7 +16,6 @@ import wandb
 from data import MRNALoArmDataset
 from loss import compute_lo_arm_loss
 from model import LoArmConfig, LoArmTransformer
-from generate import _load_checkpoint
 
 
 def _to_device(batch, device):
@@ -249,6 +248,7 @@ def _checkpoint_payload(model, config, args, dataset):
         },
     }
 
+
 def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
     train_dataset = MRNALoArmDataset(
         args.train_csv_path,
@@ -256,7 +256,6 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
         max_cds_len=args.max_cds_len,
         max_utr3_len=args.max_utr3_len,
         k=args.k,
-        only_utr5=args.only_utr5,
     )
     val_dataset = MRNALoArmDataset(
         args.test_csv_path,
@@ -264,9 +263,7 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
         max_cds_len=args.max_cds_len,
         max_utr3_len=args.max_utr3_len,
         k=args.k,
-        only_utr5=args.only_utr5,
     )
-
     print(
         f"[dataset] train={len(train_dataset)} skipped={train_dataset.skipped_count} "
         f"val={len(val_dataset)} skipped={val_dataset.skipped_count}",
@@ -283,12 +280,7 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
         target_len=train_dataset.target_len,
         dropout=args.dropout,
     )
-
-    if (args.checkpoint_path is not None):
-        model, _ = _load_checkpoint(args.checkpoint_path, device, train=True)
-    else:
-        model = LoArmTransformer(config).to(device)
-
+    model = LoArmTransformer(config).to(device)
     if distributed:
         if device.type == "cuda":
             model = DDP(model, device_ids=[local_rank], output_device=local_rank)
@@ -375,19 +367,11 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
                 step=global_step,
             )
 
-        pos_epoch = epoch + 1
-        do_save_epoch = pos_epoch % 10 == 0
-        if args.output_path and (val_loss < best_val or do_save_epoch) and rank == 0:
-
-            if do_save_epoch:
-                output_path = f"epoch_{epoch}_{args.output_path}"
-            else:
-                output_path = args.output_path
-
+        if args.output_path and val_loss < best_val and rank == 0:
             best_val = val_loss
             torch.save(
                 _checkpoint_payload(model, config, args, train_dataset),
-                output_path,
+                args.output_path,
             )
             print(f"[checkpoint] saved {args.output_path}", file=sys.stderr)
 
@@ -437,7 +421,6 @@ def main():
     parser.add_argument("--train_csv_path", default="../../data/pretraining/dataset_with_utr3/train.csv")
     parser.add_argument("--test_csv_path", default="../../data/pretraining/dataset_with_utr3/test.csv")
     parser.add_argument("--output_path", default="../../data/models/lo_arm_transformer.pt")
-    parser.add_argument("--checkpoint_path", default=None)
     parser.add_argument("--k", type=int, default=3)
     parser.add_argument("--max_utr5_len", type=int, default=200)
     parser.add_argument("--max_cds_len", type=int, default=500)
@@ -455,7 +438,6 @@ def main():
     parser.add_argument("--val_estimates_per_batch", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--only_utr5", action="store_true")
     parser.add_argument("--wandb_project", default="lo-arm-pretrain")
     parser.add_argument("--log_every", type=int, default=100)
     args = parser.parse_args()

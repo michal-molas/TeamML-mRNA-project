@@ -2,6 +2,15 @@ logs
 src/transformer_training/out
 src/transformer_training/err
 src/transformer_training/model_state_dict
+src/indigo/model_state_dict
+src/lo_arm/model_state_dict
+src/viennarna/model_state_dict
+data/pretraining/dataset_with_utr3
+!data/pretraining/dataset_with_utr3/train_small.csv
+!data/pretraining/dataset_with_utr3/test_small.csv
+
+**/out/
+**/err/
 data/state_dictionaries
 *.png
 

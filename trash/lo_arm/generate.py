@@ -80,18 +80,13 @@ def sample_from_cds(
     return {"utr5": utr5, "utr3": utr3, "target_ids": canvas.tolist()}
 
 
-def _load_checkpoint(path, device, train=False):
+def _load_checkpoint(path, device):
     checkpoint = torch.load(path, map_location=device)
     config = LoArmConfig(**checkpoint["config"])
     model = LoArmTransformer(config).to(device)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
     model.load_state_dict(state_dict)
-
-    if train:
-        model.train()
-    else:
-        model.eval()
-
+    model.eval()
     return model, checkpoint
 
 

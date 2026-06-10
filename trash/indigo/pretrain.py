@@ -744,77 +744,40 @@ def compute_validation_loss(args, model, val_dataset, pad_id, eos_id, batch_size
     if rank == 0:
         print(f"Validation Loss: {val_loss:.4f}", file=sys.stderr)
     return val_loss
-    
-def _infer_indigo_config(state_dict: dict[str, torch.Tensor]) -> SimpleNamespace:
-    token_embedding = state_dict["encoder.embedding_layer.token_embedding.weight"]
-    position_embedding = state_dict["encoder.embedding_layer.position_embedding.weight"]
-    rel_pos_embedding = state_dict["encoder.blocks.0.attention_layer.relative_positional_embedding.weight"]
-    layer_indices = {
-        int(key.split(".")[2])
-        for key in state_dict
-        if key.startswith("encoder.blocks.") and key.split(".")[2].isdigit()
-    }
-    d_model = token_embedding.shape[1]
-    d_head = rel_pos_embedding.shape[1]
-    return SimpleNamespace(
-        vocab_size=token_embedding.shape[0],
-        d_model=d_model,
-        num_heads=d_model // d_head,
-        num_layers=max(layer_indices) + 1,
-        max_len=position_embedding.shape[0],
-    )
 
-def _checkpoint_state_dict(checkpoint) -> dict[str, torch.Tensor]:
-    state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-    return {key.replace("module.", "", 1): value for key, value in state_dict.items()}
-
-def _load_indigo_checkpoint(path: str, device: torch.device) -> IndigoTransformer:
-    checkpoint = torch.load(path, map_location=device)
-    state_dict = _checkpoint_state_dict(checkpoint)
-    model = IndigoTransformer(_infer_indigo_config(state_dict)).to(device)
-    model.load_state_dict(state_dict)
-    model.train()
-    return model
 
 def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
-    train_dataset = MRNACsvDataset(
-        csv_path=args.train_csv_path,
+    dataset = MRNACsvDataset(
+        csv_path=args.csv_path,
         max_utr5_len=args.max_utr5_len,
         max_cds_len=args.max_cds_len,
         max_utr3_len=args.max_utr3_len,
         only_utr5=False,
     )
 
-    val_dataset = MRNACsvDataset(
-        csv_path=args.test_csv_path,
-        max_utr5_len=args.max_utr5_len,
-        max_cds_len=args.max_cds_len,
-        max_utr3_len=args.max_utr3_len,
-        only_utr5=False,
-    )
+    dataset_size = len(dataset)
+    val_size = int(0.2 * dataset_size)
+    train_size = dataset_size - val_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
     print(f"Train dataset length: {len(train_dataset)}", file=sys.stderr)
     print(f"Validation dataset length: {len(val_dataset)}", file=sys.stderr)
 
     config = SimpleNamespace(
-        vocab_size=train_dataset.vocab_size,
+        vocab_size=dataset.vocab_size,
         d_model=args.d_model,
         num_heads=args.n_heads,
         num_layers=args.n_layers,
-        max_len=train_dataset.max_len,
+        max_len=dataset.max_len,
     )
 
-    if (args.checkpoint_path is not None):
-        model = _load_indigo_checkpoint(args.checkpoint_path, device)
-    else:
-        model = IndigoTransformer(config).to(device)
-
+    model = IndigoTransformer(config).to(device)
     if distributed:
         model = DDP(model, device_ids=[local_rank], output_device=local_rank)
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
 
-    pad_id = train_dataset.pad_id
-    eos_id = train_dataset.eos_id
+    pad_id = dataset.pad_id
+    eos_id = dataset.eos_id
     global_step = 0
     best_loss = float("inf")
 
@@ -877,8 +840,7 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train_csv_path", type=str, default="../../data/pretraining/dataset_with_utr3/train.csv")
-    parser.add_argument("--test_csv_path", type=str, default="../../data/pretraining/dataset_with_utr3/test.csv")
+    parser.add_argument("--csv_path", type=str, default="../../data/pretraining/pretraining_refseq.csv")
     parser.add_argument("--n_layers", type=int, default=4)
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
@@ -889,7 +851,6 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--output_path", type=str, default=None)
-    parser.add_argument("--checkpoint_path", type=str, default=None)
     parser.add_argument("--gen_order", type=str, default="random",
                         choices=["random", "l2r", "r2l", "inward", "outward", "sao"],
                         help="Generation order: random | l2r | r2l | inward | outward | sao")
