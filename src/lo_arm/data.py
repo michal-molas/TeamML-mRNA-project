@@ -191,6 +191,13 @@ class MRNALoArmDataset(Dataset):
 
             utr5_tokens = self.tokenizer.tokenize(utr5_raw[::-1][:max_utr5_len])
             utr3_tokens = self.tokenizer.tokenize(utr3_raw[:max_utr3_len])
+            if (
+                self.pad_id in cds_tokens
+                or self.pad_id in utr5_tokens
+                or self.pad_id in utr3_tokens
+            ):
+                self.skipped_count += 1
+                continue
 
             if len(utr5_tokens) > self.max_utr5_tokens or len(utr3_tokens) > self.max_utr3_tokens:
                 self.skipped_count += 1

@@ -185,6 +185,28 @@ def _valid_order_mask(batch, objective_mode):
     return batch["target_order_mask"].bool()
 
 
+def _assert_orderable_targets_are_valid(target_ids, order_mask, invalid_value_ids):
+    if invalid_value_ids is None:
+        return
+    invalid_ids = torch.tensor(
+        sorted(int(idx) for idx in invalid_value_ids),
+        dtype=target_ids.dtype,
+        device=target_ids.device,
+    )
+    if invalid_ids.numel() == 0:
+        return
+    orderable_values = target_ids[order_mask]
+    if orderable_values.numel() == 0:
+        return
+    invalid_hits = (orderable_values.unsqueeze(-1) == invalid_ids).any(dim=-1)
+    if invalid_hits.any():
+        bad_ids = torch.unique(orderable_values[invalid_hits]).detach().cpu().tolist()
+        raise ValueError(
+            "Orderable target slots contain value ids that are masked from the "
+            f"classifier vocabulary: {bad_ids}"
+        )
+
+
 def _exact_f_term(
     model,
     batch,
@@ -266,6 +288,7 @@ def compute_lo_arm_loss(
     order_mask = _valid_order_mask(batch, objective_mode)
     if (order_mask.sum(dim=-1) <= 0).any():
         raise ValueError("Every batch item must have at least one orderable target slot")
+    _assert_orderable_targets_are_valid(target_ids, order_mask, invalid_value_ids)
 
     full_input_ids, full_padding_mask, full_region_ids = _model_inputs(
         batch, target_ids, order_mask
