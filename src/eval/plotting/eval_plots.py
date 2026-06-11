@@ -9,7 +9,9 @@ from __future__ import annotations
 import math
 import os
 import re
+import shutil
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
@@ -73,6 +75,7 @@ UTR_GC_METRICS = (
     MetricSpec("utr3_gc_content", "UTR3 GC content"),
 )
 MODEL_GRID_COLUMNS = 3
+ProgressCallback = Callable[[str], None]
 
 
 @dataclass(frozen=True)
@@ -82,22 +85,30 @@ class EvalPlotResult:
     row_count: int
 
 
-def generate_eval_plots(eval_dir: Path) -> EvalPlotResult:
+def _emit(progress: ProgressCallback | None, message: str) -> None:
+    if progress is not None:
+        progress(message)
+
+
+def generate_eval_plots(eval_dir: Path, progress: ProgressCallback | None = None) -> EvalPlotResult:
     """Generate the full plot suite for ``eval_dir``."""
 
     eval_dir = eval_dir.resolve()
     output_dir = eval_dir / "eval_plots"
     output_dir.mkdir(parents=True, exist_ok=True)
+    _emit(progress, "Output directory ready")
 
-    metrics = load_eval_metrics(eval_dir)
+    metrics = load_eval_metrics(eval_dir, progress=progress)
     metrics.to_csv(output_dir / "metrics.csv", index=False)
     _save_summary(metrics, output_dir)
+    _emit(progress, "Saved metrics and summary tables")
 
     improvements = calculate_te_improvements(metrics)
     improvements.to_csv(output_dir / "te_improvements.csv", index=False)
+    _emit(progress, "Computed TE improvements")
 
-    _plot_per_model(metrics, improvements, output_dir / "per_model")
-    _plot_merged(metrics, improvements, output_dir / "merged")
+    _plot_per_model(metrics, improvements, output_dir / "per_model", progress=progress)
+    _plot_merged(metrics, improvements, output_dir / "merged", progress=progress)
 
     return EvalPlotResult(
         output_dir=output_dir,
@@ -106,11 +117,16 @@ def generate_eval_plots(eval_dir: Path) -> EvalPlotResult:
     )
 
 
-def load_eval_metrics(eval_dir: Path) -> pd.DataFrame:
+def load_eval_metrics(eval_dir: Path, progress: ProgressCallback | None = None) -> pd.DataFrame:
     """Load all model subdirectories and return one tidy metrics table."""
 
     model_dirs = _discover_model_dirs(eval_dir)
-    records = [_load_model_metrics(model_dir) for model_dir in model_dirs]
+    records = []
+    for model_idx, model_dir in enumerate(model_dirs, start=1):
+        model_metrics = _load_model_metrics(model_dir)
+        records.append(model_metrics)
+        _emit(progress, f"Loaded model {model_idx}/{len(model_dirs)}: {model_dir.name}")
+
     metrics = pd.concat(records, ignore_index=True)
     metric_columns = [metric.name for metric in METRICS]
     metrics[metric_columns] = metrics[metric_columns].apply(pd.to_numeric, errors="coerce")
@@ -273,9 +289,16 @@ def _save_summary(metrics: pd.DataFrame, output_dir: Path) -> None:
     summary.reset_index().to_csv(output_dir / "summary.csv", index=False)
 
 
-def _plot_per_model(metrics: pd.DataFrame, improvements: pd.DataFrame, output_dir: Path) -> None:
+def _plot_per_model(
+    metrics: pd.DataFrame,
+    improvements: pd.DataFrame,
+    output_dir: Path,
+    *,
+    progress: ProgressCallback | None = None,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    for model in sorted(metrics["model"].unique()):
+    models = sorted(metrics["model"].unique())
+    for model_idx, model in enumerate(models, start=1):
         model_dir = output_dir / _slug(model)
         model_dir.mkdir(parents=True, exist_ok=True)
         model_metrics = metrics[metrics["model"] == model]
@@ -304,10 +327,21 @@ def _plot_per_model(metrics: pd.DataFrame, improvements: pd.DataFrame, output_di
             model_dir / "te_improvement_by_cds.png",
             title=f"{_display_name(model)}: generated TE improvement over ground truth",
         )
+        _emit(progress, f"Per-model plots {model_idx}/{len(models)}: {model}")
 
 
-def _plot_merged(metrics: pd.DataFrame, improvements: pd.DataFrame, output_dir: Path) -> None:
+def _plot_merged(
+    metrics: pd.DataFrame,
+    improvements: pd.DataFrame,
+    output_dir: Path,
+    *,
+    progress: ProgressCallback | None = None,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    stale_scatter_dir = output_dir / "correlation_scatters"
+    if stale_scatter_dir.exists():
+        shutil.rmtree(stale_scatter_dir)
+
     _plot_grouped_distribution_by_model(
         metrics,
         UTR_LENGTH_METRICS,
@@ -315,6 +349,8 @@ def _plot_merged(metrics: pd.DataFrame, improvements: pd.DataFrame, output_dir: 
         title="UTR length distributions: generated vs ground truth",
         ylabel="UTR density",
     )
+    _emit(progress, "Merged plot: UTR lengths")
+
     _plot_grouped_distribution_by_model(
         metrics,
         UTR_GC_METRICS,
@@ -322,23 +358,23 @@ def _plot_merged(metrics: pd.DataFrame, improvements: pd.DataFrame, output_dir: 
         title="UTR GC content distributions: generated vs ground truth",
         ylabel="UTR density",
     )
+    _emit(progress, "Merged plot: UTR GC content")
+
     _plot_metric_distribution_grid(
         metrics,
         MetricSpec("ribonn_te", "Predicted TE"),
         output_dir / "predicted_te_distributions_by_model.png",
         title="Predicted TE distributions by model: generated vs ground truth",
     )
+    _emit(progress, "Merged plot: predicted TE")
+
     _plot_correlation_heatmap(
         metrics,
         output_dir / "correlation_heatmap.png",
         title="Metric correlations across all models",
     )
-    _plot_pairwise_scatters(
-        metrics,
-        output_dir / "correlation_scatters",
-        title_prefix="All models",
-        merged=True,
-    )
+    _emit(progress, "Merged plot: correlation heatmap")
+
     _plot_merged_te_improvement(
         improvements,
         output_dir / "best_te_improvement_by_model.png",
@@ -346,6 +382,8 @@ def _plot_merged(metrics: pd.DataFrame, improvements: pd.DataFrame, output_dir: 
         value_column="best_te_improvement",
         ylabel="Best generated TE - ground-truth TE",
     )
+    _emit(progress, "Merged plot: best TE improvement")
+
     _plot_focused_scatter_by_model(
         metrics,
         "utr5_length",
@@ -355,6 +393,7 @@ def _plot_merged(metrics: pd.DataFrame, improvements: pd.DataFrame, output_dir: 
         xlabel="UTR5 length (nt)",
         ylabel="UTR3 length (nt)",
     )
+    _emit(progress, "Merged plot: UTR3 vs UTR5")
 
 
 def _plot_distribution_grid(
