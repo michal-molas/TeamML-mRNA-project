@@ -42,10 +42,10 @@ def process_row(row_dict, upstream: int, downstream: int):
     aug_seq = aug_window(utr5, cds, upstream, downstream)
 
     structure, mfe = fold(sequence)
-    # utr5_structure, utr5_mfe = fold(utr5)
-    # cds_structure, cds_mfe = fold(cds)
-    # utr3_structure, utr3_mfe = fold(utr3)
-    # aug_structure, aug_mfe = fold(aug_seq)
+    utr5_structure, utr5_mfe = fold(utr5)
+    cds_structure, cds_mfe = fold(cds)
+    utr3_structure, utr3_mfe = fold(utr3)
+    aug_structure, aug_mfe = fold(aug_seq)
 
     return {
         "id": row_id,
@@ -56,15 +56,15 @@ def process_row(row_dict, upstream: int, downstream: int):
         "sequence": sequence,
         "structure": structure,
         "mfe": mfe,
-        # "utr5_structure": utr5_structure,
-        # "utr5_mfe": utr5_mfe,
-        # "cds_structure": cds_structure,
-        # "cds_mfe": cds_mfe,
-        # "utr3_structure": utr3_structure,
-        # "utr3_mfe": utr3_mfe,
-        # "aug_window_sequence": aug_seq,
-        # "aug_window_structure": aug_structure,
-        # "aug_window_mfe": aug_mfe,
+        "utr5_structure": utr5_structure,
+        "utr5_mfe": utr5_mfe,
+        "cds_structure": cds_structure,
+        "cds_mfe": cds_mfe,
+        "utr3_structure": utr3_structure,
+        "utr3_mfe": utr3_mfe,
+        "aug_window_sequence": aug_seq,
+        "aug_window_structure": aug_structure,
+        "aug_window_mfe": aug_mfe,
         "seq_len": len(sequence),
         "utr5_len": len(utr5),
         "cds_len": len(cds),

@@ -14,9 +14,9 @@ source ../../venv_setup/activate.sh
 
 # full dataset
 INPUT_TR="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/train.csv"
-OUTPUT_TR="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/train_vienna.csv"
+OUTPUT_TR="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/train_vienna_full.csv"
 INPUT_TE="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/test.csv"
-OUTPUT_TE="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/test_vienna.csv"
+OUTPUT_TE="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/test_vienna_full.csv"
 
 # 200K samples
 # INPUT_TR="~/hai_1223/TeamML-mRNA-project/data/pretraining/dataset_with_utr3/train_200.csv"
