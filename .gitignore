@@ -6,6 +6,7 @@ src/indigo/model_state_dict
 src/lo_arm/model_state_dict
 src/viennarna/model_state_dict
 data/pretraining/dataset_with_utr3
+data/models
 !data/pretraining/dataset_with_utr3/train_small.csv
 !data/pretraining/dataset_with_utr3/test_small.csv
 

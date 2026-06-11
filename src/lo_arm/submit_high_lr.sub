@@ -31,12 +31,12 @@ time torchrun \
    train.py \
     --train_csv_path ../../data/pretraining/dataset_with_utr3/train.csv \
     --test_csv_path ../../data/pretraining/dataset_with_utr3/test.csv \
-    --output_path ../../data/models/lo_arm_utr5/lo_arm_pretrained.pt \
-    --only_utr5 \
+    --output_path ../../data/models/lo_arm_high_lr/lo_arm_pretrained.pt \
+    --checkpoint_path ../../data/models/lo_arm_high_lr/lo_arm_pretrained.pt \
     --n_layers 6 \
     --d_model 256 \
     --n_heads 8 \
-    --batch_size 340 \
+    --batch_size 256 \
     --learning_rate 5e-5 \
     --weight_decay 0.01 \
     --grad_clip 1.0 \
