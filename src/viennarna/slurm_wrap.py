@@ -5,7 +5,7 @@ import sys
 import os
 import time
 
-def is_job_running(job_id) -> bool:
+def is_job_running(job_id) -> str:
     print(f"Waiting for job {job_id} to run", end='.', flush=True)
 
     while True:

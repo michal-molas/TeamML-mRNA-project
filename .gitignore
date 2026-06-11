@@ -13,6 +13,7 @@ data/models
 **/out/
 **/err/
 data/state_dictionaries
+trash
 *.png
 
 # Byte-compiled / optimized / DLL files

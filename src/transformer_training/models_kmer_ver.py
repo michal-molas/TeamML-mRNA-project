@@ -1,3 +1,6 @@
+import math
+from itertools import product
+
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -5,48 +8,6 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 
 
-MRNA_VOCAB = {
-    'A': 0,
-    'U': 1,
-    'T': 1,
-    'C': 2,
-    'G': 3,
-    '<PAD>': 4,
-    '<BOS>': 5,
-    '<EOS>': 6,
-    '<CDS>': 7,
-    '<UTR5>': 8,
-    '<UTR3>': 9,
-}
-
-class MRNATokenizer:
-    def __init__(self, only_utr5=False):
-        self.vocab = MRNA_VOCAB.copy()
-
-        if only_utr5:
-            self.vocab.pop('<UTR3>', None)
-
-        self.id_to_token = {v: k for k, v in self.vocab.items() if k != 'U'}
-
-        self.vocab_size = len(set(self.vocab.values()))
-        self.pad_id = self.vocab['<PAD>']
-        self.bos_id = self.vocab['<BOS>']
-        self.eos_id = self.vocab['<EOS>']
-        self.cds_id = self.vocab['<CDS>']
-        self.utr5_id = self.vocab['<UTR5>']
-        self.utr3_id = self.vocab.get('<UTR3>')
-
-    def tokenize(self, seq):
-        return [self.vocab.get(n, self.pad_id) for n in str(seq).upper()]
-
-    def detokenize(self, token_ids):
-        # ignore special tokens, return only ACTG
-        tokens = [self.id_to_token.get(token_id, '') for token_id in token_ids]
-        chars = [t for t in tokens if t in {'A', 'C', 'G', 'T'}]
-        return ''.join(chars)
-
-
-#TODO: Separate tokenization from the dataset (pass tokenizer object as arg)
 class MRNACsvDataset(Dataset):
     def __init__(
         self,
@@ -55,6 +16,7 @@ class MRNACsvDataset(Dataset):
         max_cds_len=8192,
         max_utr3_len=2048,
         only_utr5=False,
+        k=3,
     ):
         dataframe = None
         if (csv_path.split('.')[-1] == 'xlsx'):
@@ -67,29 +29,36 @@ class MRNACsvDataset(Dataset):
         self.max_cds_len = max_cds_len
         self.max_utr3_len = max_utr3_len
         self.only_utr5 = only_utr5
+        self.k = k
+
+        kmers = [''.join(p) for p in product('ATCG', repeat=k)]
+        self.vocab = {kmer: i for i, kmer in enumerate(kmers)}
+
+        # Special tokens appended after k-mer tokens
+        n_kmer = len(self.vocab)  # == 4^k
+        self.vocab['<PAD>'] = n_kmer
+        self.vocab['<BOS>'] = n_kmer + 1
+        self.vocab['<EOS>'] = n_kmer + 2
+        self.vocab['<CDS>'] = n_kmer + 3
+        self.vocab['<UTR5>'] = n_kmer + 4
+        if not self.only_utr5:
+            self.vocab['<UTR3>'] = n_kmer + 5
+
+        self.vocab_size = len(self.vocab)
+
+        # Max lengths in token units (sequences are trimmed in nt units before tokenisation)
+        max_utr5_tokens = math.ceil(max_utr5_len / k)
+        max_cds_tokens = math.ceil(max_cds_len / k)
+        max_utr3_tokens = math.ceil(max_utr3_len / k)
+        self.max_cds_tokens = max_cds_tokens
+
         # full sequence length - 1 (because we shift by 1 when comparing input_ids and target_ids)
         # <BOS> + <CDS> + cds + <UTR5> + utr5 + [<UTR3> + utr3] + <EOS>
         if self.only_utr5:
-            self.max_len = (max_utr5_len + max_cds_len + 4) - 1
+            self.max_len = (max_utr5_tokens + max_cds_tokens + 4) - 1
         else:
-            self.max_len = (max_utr5_len + max_cds_len + max_utr3_len + 5) - 1
+            self.max_len = (max_utr5_tokens + max_cds_tokens + max_utr3_tokens + 5) - 1
 
-        self.vocab = {
-            'A': 0,
-            'U': 1,
-            'T': 1,
-            'C': 2,
-            'G': 3,
-            '<PAD>': 4,
-            '<BOS>': 5,
-            '<EOS>': 6,
-            '<CDS>': 7,
-            '<UTR5>': 8,
-        }
-        if not self.only_utr5:
-            self.vocab['<UTR3>'] = 9
-
-        self.vocab_size = len(set(self.vocab.values()))
         self.pad_id = self.vocab['<PAD>']
         self.bos_id = self.vocab['<BOS>']
         self.eos_id = self.vocab['<EOS>']
@@ -103,7 +72,7 @@ class MRNACsvDataset(Dataset):
         self.skipped_count = 0
 
         print("Loading dataset...")
-        for _, row in tqdm(self.df.iterrows(), total=len(self.df)):
+        for i, row in tqdm(self.df.iterrows(), total=len(self.df)):
             # 5'UTR generation should be right-to-left, hence the reverse
             # UTRs are trimmed to max length, mrna is skipped if CDS is too long
             utr5_str = str(row["utr5"])[::-1][:self.max_utr5_len].upper()
@@ -117,7 +86,7 @@ class MRNACsvDataset(Dataset):
             cds_len = len(cds_tokens)
             utr3_len = len(utr3_tokens)
 
-            if cds_len > self.max_cds_len:
+            if cds_len > self.max_cds_tokens:
                 self.skipped_count += 1
                 continue
 
@@ -139,7 +108,11 @@ class MRNACsvDataset(Dataset):
         return len(self.tokenized_samples)
 
     def tokenize(self, seq):
-        return [self.vocab.get(n, self.pad_id) for n in seq]
+        seq = seq.replace('U', 'T')
+        return [
+            self.vocab.get(seq[i:i + self.k], self.pad_id)
+            for i in range(0, len(seq) - self.k + 1, self.k)
+        ]
 
     def __getitem__(self, idx):
         utr5_tokens, cds_tokens, utr3_tokens, te = self.tokenized_samples[idx]
