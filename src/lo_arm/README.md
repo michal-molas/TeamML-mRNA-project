@@ -6,8 +6,9 @@ learns both what nucleotide k-mer token to generate and which target position to
 generate next.
 
 The implementation is adapted to the existing repo task rather than molecular
-graph generation: it generates a fixed target canvas containing the reversed
-5'UTR, optional 3'UTR content, and terminal/padding tokens.
+graph generation: it samples a UTR layout from an empirical prior, then infills
+only the real 5'UTR/3'UTR k-mer slots. Padding is bookkeeping, not a modeled
+target value.
 
 ## Data layout
 
@@ -15,8 +16,8 @@ The tokenizer follows the existing k-mer convention used by the baseline
 Transformer code. For `k=3`, the vocabulary contains all DNA 3-mers plus special
 tokens:
 
-- `<PAD>`: learned post-EOS padding value in the target canvas, and padding in
-  the CDS prefix.
+- `<PAD>`: padding in the CDS prefix and unused target canvas slots. It is not
+  part of the default loss or order-policy action space.
 - `<BOS>`: beginning of the conditional prefix.
 - `<EOS>`: end of the generated UTR target.
 - `<CDS>`: marker before CDS tokens.
@@ -25,16 +26,20 @@ tokens:
 - `<MASK>`: LO-ARM sampling mask meaning "this target slot is not generated
   yet".
 
-Each example is represented as a fixed-length prefix plus a fixed-length target:
+Each example is represented as a fixed-length prefix plus a fixed-width target
+canvas. The target canvas contains only real UTR k-mer slots followed by
+padding:
 
 ```text
 prefix = <BOS>, <CDS>, cds_tokens, <UTR5>, <PAD>...
-target = reversed_utr5_tokens, <UTR3>, utr3_tokens, <EOS>, <PAD>...
+target = reversed_utr5_tokens, utr3_tokens, <PAD>...
 ```
 
-Only target slots participate in LO-ARM ordering. Prefix padding is hidden from
-attention with `prefix_padding_mask`; target-side `<PAD>` tokens are not hidden,
-because the model must learn where post-EOS padding belongs.
+Each sample also carries a token-space layout tuple
+`(total_len, utr5_len, cds_len, utr3_len)`, a `target_order_mask`, and
+`target_region_ids`. Only `target_order_mask=True` slots participate in LO-ARM
+ordering and reconstruction. Prefix padding and target-side `<PAD>` slots are
+hidden from attention.
 
 5'UTR tokens are stored reversed during training so generation proceeds outward
 from the CDS-proximal side, matching the baseline dataset convention. At decode
@@ -63,22 +68,26 @@ to those target states:
 
 The model is non-causal because the visible/masked canvas itself controls what
 information is available. Generated target slots are visible; ungenerated slots
-contain `<MASK>`.
+contain `<MASK>`. Token, position, and region embeddings are summed so the model
+knows whether each visible target slot belongs to 5'UTR or 3'UTR.
 
 ## Training objective
 
 Training uses the LO-ARM variational objective with a two-sample
-REINFORCE leave-one-out (RLOO) estimator.
+REINFORCE leave-one-out (RLOO) estimator. The default objective is the scheduled
+alpha-beta ELBO; `--objective_mode elbo` keeps the original ELBO coefficients on
+the new PAD-free masks, while `--objective_mode legacy_full_canvas` restores the
+old full-canvas baseline for debugging.
 
 For each batch:
 
 1. Run the model on the fully observed target to obtain posterior logits.
-2. Sample two complete target-slot permutations with Gumbel-top-k.
+2. Sample two complete real-target-slot permutations with Gumbel-top-k.
 3. Sample one partial generation depth `n_previous`.
 4. Build two partial target canvases by revealing the first `n_previous` slots
    from each sampled permutation and masking all remaining slots with `<MASK>`.
 5. Run the model on each partial canvas.
-6. For the next generation step, exactly sum over all still-masked candidate
+6. For the next generation step, exactly sum over all still-masked real candidate
    slots:
    - the model order-policy log probability,
    - the value log probability of the true target token,
@@ -90,26 +99,26 @@ metrics, including stochastic negative ELBO.
 
 ## Generation
 
-Generation starts from a CDS prefix and an all-`<MASK>` target canvas:
+Generation starts from a CDS prefix and a sampled layout. The layout is drawn
+from the checkpoint's empirical training prior, conditioned on the tokenized CDS
+length when possible. The target canvas masks real UTR slots and leaves padding
+as `<PAD>`:
 
 ```text
-target = <MASK>, <MASK>, ..., <MASK>
+target = <MASK>...<MASK>, <PAD>...
 ```
 
 At each step:
 
 1. Run the model on `prefix + target`.
-2. Mask out already-filled target slots in the order-policy logits.
+2. Mask out already-filled slots and all PAD slots in the order-policy logits.
 3. Choose or sample the next target slot.
 4. Choose or sample the token value for that slot.
 5. Write the sampled value into the target canvas.
 
-After all slots are filled, the target is decoded by:
-
-1. Cropping at the first `<EOS>`.
-2. Splitting at `<UTR3>`.
-3. Detokenizing both regions.
-4. Reversing the 5'UTR region back to normal orientation.
+After all real slots are filled, the sampled layout determines the split:
+the first `utr5_len` target tokens are decoded as 5'UTR and reversed back, and
+the next `utr3_len` tokens are decoded as 3'UTR.
 
 The sampling CLI writes the same CSV shape used elsewhere in the repo:
 
@@ -145,6 +154,7 @@ MAX_UTR3_LEN=200 \
 N_LAYERS=4 \
 D_MODEL=256 \
 N_HEADS=8 \
+OBJECTIVE_MODE=alpha_beta \
 BATCH_SIZE=16 \
 EPOCHS=5 \
 src/lo_arm/run_train.sh
@@ -159,6 +169,7 @@ MAX_SAMPLES=100 \
 MAX_UTR5_LEN=200 \
 MAX_CDS_LEN=500 \
 MAX_UTR3_LEN=200 \
+ORDER_TOP_P=0.9 \
 src/lo_arm/run_generate.sh
 ```
 
@@ -178,14 +189,12 @@ is available and falls back to Gloo for CPU-only distributed smoke tests.
 
 ## Future directions
 
+- Add a factorized novelty layout prior behind the same layout-prior interface.
 - Load tokenizer and data limits from the checkpoint during sampling by default,
   and validate explicit CLI overrides against `model.config`.
-- Mask impossible target values during training and generation: allow k-mers,
-  `<UTR3>`, `<EOS>`, and `<PAD>`; disallow `<BOS>`, `<CDS>`, `<UTR5>`, and
-  `<MASK>`.
 - Add deterministic or averaged validation so checkpoint selection is less noisy
   than a single stochastic ELBO estimate.
-- Add order diagnostics, such as selected-slot histograms, UTR5/UTR3/PAD
+- Expand order diagnostics, such as selected-slot histograms, UTR5/UTR3
   generation timing, and entropy of selected slots.
 - Add larger training presets and optional DDP once one-GPU training behavior is
   stable.
@@ -196,9 +205,10 @@ is available and falls back to Gloo for CPU-only distributed smoke tests.
 
 ## Current verification
 
-The focused test suite covers vocabulary invariants, target encode/decode,
-Gumbel-top-k permutations, partial masks, finite differentiable loss, target-pad
-attention behavior, and sampling smoke checks:
+The focused test suite covers vocabulary invariants, layout-prior sampling,
+target encode/decode, Gumbel-top-k permutations, partial masks, objective
+toggles, finite differentiable loss, target-pad attention behavior, and sampling
+smoke checks:
 
 ```bash
 venv/bin/python -m pytest tests/test_lo_arm.py

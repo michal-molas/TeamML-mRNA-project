@@ -32,6 +32,7 @@ for path in (str(REPO_ROOT), str(SRC_ROOT), str(TRANSFORMER_ROOT), str(LO_ARM_RO
 from src.indigo.main import IndigoTransformer
 from src.lo_arm.data import MRNALoArmDataset
 from src.lo_arm.generate import _load_checkpoint as _load_loarm_checkpoint
+from src.lo_arm.generate import _layout_prior_from_checkpoint as _loarm_layout_prior_from_checkpoint
 from src.lo_arm.generate import sample_from_cds as loarm_sample_from_cds
 from src.transformer_training.generate import MRNAInferenceSampler
 from src.transformer_training.models import MRNA_VOCAB, MRNACsvDataset, MRNATransformer
@@ -162,6 +163,7 @@ def _loarm_dataset_kwargs(args: argparse.Namespace, checkpoint: dict) -> dict:
 def _generate_loarm(args: argparse.Namespace, device: torch.device) -> list[dict[str, str]]:
     model, checkpoint = _load_loarm_checkpoint(args.checkpoint_path, device)
     dataset = MRNALoArmDataset(args.input_csv, **_loarm_dataset_kwargs(args, checkpoint))
+    layout_prior = _loarm_layout_prior_from_checkpoint(checkpoint)
 
     rows = []
     n_samples = len(dataset) if args.max_samples is None else min(len(dataset), args.max_samples)
@@ -184,6 +186,8 @@ def _generate_loarm(args: argparse.Namespace, device: torch.device) -> list[dict
                 temperature=args.temperature,
                 greedy_order=args.greedy,
                 greedy_value=args.greedy,
+                order_top_p=args.order_top_p,
+                layout_prior=layout_prior,
             )
             rows.append(
                 {
@@ -402,6 +406,7 @@ def _get_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_k", type=int, default=20, help="Transformer top-k sampling.")
+    parser.add_argument("--order_top_p", type=float, default=0.9, help="LO-ARM order top-p sampling.")
     parser.add_argument("--greedy", action="store_true", help="Use greedy value sampling where supported.")
 
     parser.add_argument("--k", type=int, default=None, help="K-mer size for INDIGO/LO-ARM datasets.")

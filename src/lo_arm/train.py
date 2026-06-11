@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import random
 import subprocess
@@ -13,9 +14,28 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 import wandb
 
-from data import MRNALoArmDataset
-from loss import compute_lo_arm_loss
-from model import LoArmConfig, LoArmTransformer
+try:
+    from .data import NUM_REGIONS, MRNALoArmDataset
+    from .loss import (
+        OBJECTIVE_ALPHA_BETA,
+        OBJECTIVE_ELBO,
+        OBJECTIVE_LEGACY_FULL_CANVAS,
+        OBJECTIVE_MODES,
+        ab_schedule,
+        compute_lo_arm_loss,
+    )
+    from .model import LoArmConfig, LoArmTransformer
+except ImportError:  # pragma: no cover - script execution fallback
+    from data import NUM_REGIONS, MRNALoArmDataset
+    from loss import (
+        OBJECTIVE_ALPHA_BETA,
+        OBJECTIVE_ELBO,
+        OBJECTIVE_LEGACY_FULL_CANVAS,
+        OBJECTIVE_MODES,
+        ab_schedule,
+        compute_lo_arm_loss,
+    )
+    from model import LoArmConfig, LoArmTransformer
 
 
 def _to_device(batch, device):
@@ -70,6 +90,8 @@ def validate(
     mask_id,
     batch_size,
     device,
+    objective_mode=OBJECTIVE_ELBO,
+    invalid_value_ids=None,
     rank=0,
     world_size=1,
     distributed=False,
@@ -77,7 +99,15 @@ def validate(
     estimates_per_batch=2,
 ):
     model.eval()
-    metric_names = ["negative_elbo", "order_entropy", "posterior_entropy", "value_nll"]
+    metric_names = [
+        "negative_elbo",
+        "negative_tilted_objective",
+        "order_entropy",
+        "posterior_entropy",
+        "value_nll",
+        "kl_qp",
+        "target_length",
+    ]
     depths = _depth_buckets(dataset.target_len)
     totals = {
         depth: {metric_name: 0.0 for metric_name in metric_names}
@@ -100,7 +130,16 @@ def validate(
         batch_count = batch["target_ids"].size(0)
         for depth in depths:
             for _ in range(estimates_per_batch):
-                metrics = compute_lo_arm_loss(model, batch, mask_id, n_previous=depth)
+                metrics = compute_lo_arm_loss(
+                    model,
+                    batch,
+                    mask_id,
+                    n_previous=depth,
+                    objective_mode=objective_mode,
+                    alpha=0.0,
+                    beta=1.0,
+                    invalid_value_ids=invalid_value_ids,
+                )
                 for metric_name in metric_names:
                     totals[depth][metric_name] += (
                         float(metrics[metric_name].item()) * batch_count
@@ -142,6 +181,9 @@ def validate(
         "negative_elbo_by_depth": {
             depth: by_depth[depth]["negative_elbo"] for depth in depths
         },
+        "target_length_by_depth": {
+            depth: by_depth[depth]["target_length"] for depth in depths
+        },
         "by_depth": by_depth,
     }
 
@@ -149,9 +191,16 @@ def validate(
 TRAIN_LOG_METRIC_NAMES = [
     "loss",
     "negative_elbo",
+    "negative_tilted_objective",
     "order_entropy",
     "posterior_entropy",
     "value_nll",
+    "kl_qp",
+    "recon",
+    "distill",
+    "target_length",
+    "alpha",
+    "beta",
     "grad_norm",
     "n_previous",
 ]
@@ -184,9 +233,16 @@ def _accumulate_train_log(accumulator, metrics, grad_norm):
     values = {
         "loss": _metric_float(metrics["loss"]),
         "negative_elbo": _metric_float(metrics["negative_elbo"]),
+        "negative_tilted_objective": _metric_float(metrics["negative_tilted_objective"]),
         "order_entropy": _metric_float(metrics["order_entropy"]),
         "posterior_entropy": _metric_float(metrics["posterior_entropy"]),
         "value_nll": _metric_float(metrics["value_nll"]),
+        "kl_qp": _metric_float(metrics["kl_qp"]),
+        "recon": _metric_float(metrics["recon"]),
+        "distill": _metric_float(metrics["distill"]),
+        "target_length": _metric_float(metrics["target_length"]),
+        "alpha": float(metrics["alpha"]),
+        "beta": float(metrics["beta"]),
         "grad_norm": _metric_float(grad_norm),
         "n_previous": float(depth),
     }
@@ -226,9 +282,13 @@ def _wandb_validation_metrics(val_metrics):
         "valid/order_entropy": val_metrics["order_entropy"],
         "valid/posterior_entropy": val_metrics["posterior_entropy"],
         "valid/value_nll": val_metrics["value_nll"],
+        "valid/kl_qp": val_metrics["kl_qp"],
+        "valid/target_length": val_metrics["target_length"],
     }
     for depth, value in val_metrics["negative_elbo_by_depth"].items():
         logs[f"valid/negative_elbo_by_depth/{depth}"] = value
+    for depth, value in val_metrics["target_length_by_depth"].items():
+        logs[f"valid/target_length_by_depth/{depth}"] = value
     return logs
 
 
@@ -240,11 +300,25 @@ def _checkpoint_payload(model, config, args, dataset):
             "k": args.k,
             "vocab": dataset.vocab,
             "mask_id": dataset.mask_id,
+            "special_ids": sorted(int(idx) for idx in dataset.tokenizer.special_ids),
         },
         "data": {
             "max_utr5_len": args.max_utr5_len,
             "max_cds_len": args.max_cds_len,
             "max_utr3_len": args.max_utr3_len,
+            "layout_prior": dataset.layout_prior.to_serializable()
+            if dataset.layout_prior is not None
+            else [],
+        },
+        "layout_prior": dataset.layout_prior.to_serializable()
+        if dataset.layout_prior is not None
+        else [],
+        "training": {
+            "objective_mode": args.objective_mode,
+            "alpha0": args.alpha0,
+            "beta0": args.beta0,
+            "ab_hold_frac": args.ab_hold_frac,
+            "ab_decay_frac": args.ab_decay_frac,
         },
     }
 
@@ -278,6 +352,7 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
         max_len=train_dataset.max_len,
         prefix_len=train_dataset.prefix_len,
         target_len=train_dataset.target_len,
+        num_regions=NUM_REGIONS,
         dropout=args.dropout,
     )
     model = LoArmTransformer(config).to(device)
@@ -292,7 +367,23 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
     global_step = 0
     train_depths = _depth_buckets(train_dataset.target_len)
     train_log_accumulator = _new_train_log_accumulator(train_depths)
+    steps_per_epoch = math.ceil(len(train_dataset) / max(args.batch_size * world_size, 1))
+    total_steps = args.total_steps or max(args.epochs * steps_per_epoch, 1)
+    train_invalid_value_ids = (
+        None
+        if args.objective_mode == OBJECTIVE_LEGACY_FULL_CANVAS
+        else train_dataset.tokenizer.special_ids
+    )
+    validation_objective_mode = (
+        OBJECTIVE_LEGACY_FULL_CANVAS
+        if args.objective_mode == OBJECTIVE_LEGACY_FULL_CANVAS
+        else OBJECTIVE_ELBO
+    )
     print(f"Using train depths: {train_depths}")
+    print(
+        f"Using objective_mode={args.objective_mode} total_steps={total_steps}",
+        file=sys.stderr,
+    )
     for epoch in range(args.epochs):
         model.train()
         loss_sum = 0.0
@@ -317,8 +408,26 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
             batch = _samples_to_batch(samples, device)
             optimizer.zero_grad()
             n_previous = train_depths[global_step % len(train_depths)]
+            if args.objective_mode == OBJECTIVE_ALPHA_BETA:
+                alpha, beta = ab_schedule(
+                    global_step,
+                    total_steps,
+                    alpha0=args.alpha0,
+                    beta0=args.beta0,
+                    hold_frac=args.ab_hold_frac,
+                    decay_frac=args.ab_decay_frac,
+                )
+            else:
+                alpha, beta = 0.0, 1.0
             metrics = compute_lo_arm_loss(
-                model, batch, train_dataset.mask_id, n_previous=n_previous
+                model,
+                batch,
+                train_dataset.mask_id,
+                n_previous=n_previous,
+                objective_mode=args.objective_mode,
+                alpha=alpha,
+                beta=beta,
+                invalid_value_ids=train_invalid_value_ids,
             )
             loss = metrics["loss"]
             loss.backward()
@@ -357,6 +466,8 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
             distributed=distributed,
             max_batches=args.max_val_batches,
             estimates_per_batch=args.val_estimates_per_batch,
+            objective_mode=validation_objective_mode,
+            invalid_value_ids=train_invalid_value_ids,
         )
         val_loss = val_metrics["negative_elbo"]
         if rank == 0:
@@ -429,6 +540,16 @@ def main():
     parser.add_argument("--d_model", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument(
+        "--objective_mode",
+        choices=sorted(OBJECTIVE_MODES),
+        default=OBJECTIVE_ALPHA_BETA,
+    )
+    parser.add_argument("--alpha0", type=float, default=0.025)
+    parser.add_argument("--beta0", type=float, default=1.05)
+    parser.add_argument("--ab_hold_frac", type=float, default=0.25)
+    parser.add_argument("--ab_decay_frac", type=float, default=0.25)
+    parser.add_argument("--total_steps", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=0.0)
