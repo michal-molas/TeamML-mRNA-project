@@ -79,7 +79,7 @@ def _count_model_dirs(eval_dir: Path) -> int:
 
 def _progress_total(eval_dir: Path) -> int:
     model_count = _count_model_dirs(eval_dir)
-    return 2 * model_count + 9
+    return 3 * model_count + 14
 
 
 def _get_parser() -> argparse.ArgumentParser:
