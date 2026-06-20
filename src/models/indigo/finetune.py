@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 import wandb
 
 from .._ribonn_import import import_ribonn_model
-from ..transformer.models import MRNACsvDataset
+from ..common import MRNACsvDataset
 from .main import IndigoTransformer
 from .pretrain import (
     _extend_R,

@@ -20,11 +20,12 @@ from tqdm import tqdm
 
 
 from src.models.indigo import IndigoTransformer
+from src.models.common import MRNA_VOCAB, MRNACsvDataset
 from src.models.lo_arm.data import MRNALoArmDataset
 from src.models.lo_arm.generate import _load_checkpoint as _load_loarm_checkpoint
 from src.models.lo_arm.generate import sample_from_cds as loarm_sample_from_cds
 from src.models.transformer.generate import MRNAInferenceSampler
-from src.models.transformer.models import MRNA_VOCAB, MRNACsvDataset, MRNATransformer
+from src.models.transformer.models import MRNATransformer
 
 
 INPUT_COLS = ["id", "utr5", "cds", "utr3"]

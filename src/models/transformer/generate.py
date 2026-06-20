@@ -7,7 +7,8 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from .models import MRNATransformer, MRNATokenizer, MRNA_VOCAB
+from ..common import MRNA_VOCAB, MRNATokenizer
+from .models import MRNATransformer
 
 
 def load_pretrained_weights(model, checkpoint_path, device):

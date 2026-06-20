@@ -12,7 +12,8 @@ from tqdm import tqdm
 import wandb
 
 from .._ribonn_import import import_ribonn_model
-from .models import MRNACsvDataset, MRNATransformer
+from ..common import MRNACsvDataset
+from .models import MRNATransformer
 
 RIBONN_MAX_UTR5_LEN = 1_381
 RIBONN_MAX_CDS_UTR3_LEN = 11_937

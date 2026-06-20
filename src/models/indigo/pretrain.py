@@ -15,7 +15,7 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 from types import SimpleNamespace
 
-from ..transformer.models import MRNACsvDataset
+from ..common import MRNACsvDataset
 from .main import IndigoTransformer
 
 

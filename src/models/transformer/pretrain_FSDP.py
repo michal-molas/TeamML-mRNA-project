@@ -23,7 +23,8 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
-from .models import MRNACsvDataset, MRNATransformer
+from ..common import MRNACsvDataset
+from .models import MRNATransformer
 
 
 def is_dist():
