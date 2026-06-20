@@ -16,21 +16,19 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 import wandb
 
-
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "RiboNN"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-sys.path.insert(0, "../transformer_training")
-from RiboNN.src.model import RiboNN
-sys.path.remove(str(Path(__file__).resolve().parents[2] / "RiboNN"))
-from transformer_training.models import MRNACsvDataset, MRNATransformer
-sys.path.remove(str(Path(__file__).resolve().parents[2]))
-sys.path.remove(str(Path(__file__).resolve().parents[2] / "src"))
-sys.path.remove("../transformer_training")
-from main import IndigoTransformer
-print(str(Path(__file__).resolve()))
-print(sys.path)
+from .._ribonn_import import import_ribonn_model
+from ..transformer.models import MRNACsvDataset
+from .main import IndigoTransformer
+from .pretrain import (
+    _extend_R,
+    _extend_beam_state,
+    _score_remaining,
+    beam_search_perms,
+    build_full_R_matrix,
+    compute_position_targets,
+    extract_prefix_and_target,
+    make_generation_perm,
+)
 
 def load_pretrained_weights(model, checkpoint_path, device):
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -73,6 +71,7 @@ RIBONN_CONFIG = dict(
 
 
 def load_ribonn(weights_path, device, verbose=False):
+    RiboNN = import_ribonn_model()
     model = RiboNN(**dict(RIBONN_CONFIG))
     state_dict = torch.load(weights_path, map_location=device)
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
@@ -123,9 +122,6 @@ class RiboNNEnsemble(torch.nn.Module):
 # ============================================================
 # InDIGO core: relative matrix R, permutation training, SAO
 # ============================================================
-
-
-from pretrain import build_full_R_matrix, compute_position_targets, make_generation_perm, _extend_R, _score_remaining, beam_search_perms, _extend_beam_state, extract_prefix_and_target
 
 
 # ============================================================

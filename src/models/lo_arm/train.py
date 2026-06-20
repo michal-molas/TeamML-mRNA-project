@@ -13,9 +13,9 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 import wandb
 
-from data import MRNALoArmDataset
-from loss import compute_lo_arm_loss
-from model import LoArmConfig, LoArmTransformer
+from .data import MRNALoArmDataset
+from .loss import compute_lo_arm_loss
+from .model import LoArmConfig, LoArmTransformer
 
 
 def _to_device(batch, device):

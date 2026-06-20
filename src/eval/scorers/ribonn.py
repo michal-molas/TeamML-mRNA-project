@@ -1,15 +1,11 @@
-from pathlib import Path
-import sys
 from types import SimpleNamespace
 
 import pandas as pd
 import torch
 from tqdm import tqdm
 
-from scorers.base import Scorer
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "transformer_training"))
-from finetune import (
+from .base import Scorer
+from src.models.transformer.finetune import (
     RIBONN_CONFIG,
     RIBONN_MAX_TX_LEN,
     RIBONN_MAX_UTR5_LEN,

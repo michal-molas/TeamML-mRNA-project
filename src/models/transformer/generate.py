@@ -1,5 +1,4 @@
 import argparse
-import sys
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 
@@ -8,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from models import MRNATransformer, MRNATokenizer, MRNA_VOCAB
+from .models import MRNATransformer, MRNATokenizer, MRNA_VOCAB
 
 
 def load_pretrained_weights(model, checkpoint_path, device):

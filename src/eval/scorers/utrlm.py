@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Iterable
 
 import pandas as pd
 
-from scorers.base import Scorer
+from .base import Scorer
 
 if TYPE_CHECKING:
     import torch

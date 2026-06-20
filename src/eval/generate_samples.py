@@ -10,7 +10,6 @@ The output CSV contains id, sample, utr5, cds, and utr3 columns.
 """
 
 import argparse
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,21 +19,12 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-SRC_ROOT = REPO_ROOT / "src"
-TRANSFORMER_ROOT = SRC_ROOT / "transformer_training"
-LO_ARM_ROOT = SRC_ROOT / "lo_arm"
-
-for path in (str(REPO_ROOT), str(SRC_ROOT), str(TRANSFORMER_ROOT), str(LO_ARM_ROOT)):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
-from src.indigo.main import IndigoTransformer
-from src.lo_arm.data import MRNALoArmDataset
-from src.lo_arm.generate import _load_checkpoint as _load_loarm_checkpoint
-from src.lo_arm.generate import sample_from_cds as loarm_sample_from_cds
-from src.transformer_training.generate import MRNAInferenceSampler
-from src.transformer_training.models import MRNA_VOCAB, MRNACsvDataset, MRNATransformer
+from src.models.indigo import IndigoTransformer
+from src.models.lo_arm.data import MRNALoArmDataset
+from src.models.lo_arm.generate import _load_checkpoint as _load_loarm_checkpoint
+from src.models.lo_arm.generate import sample_from_cds as loarm_sample_from_cds
+from src.models.transformer.generate import MRNAInferenceSampler
+from src.models.transformer.models import MRNA_VOCAB, MRNACsvDataset, MRNATransformer
 
 
 INPUT_COLS = ["id", "utr5", "cds", "utr3"]

@@ -6,7 +6,7 @@ from math import ceil
 import pandas as pd
 from tqdm import tqdm
 
-import scorers
+from . import scorers
 
 
 INDEX_COLS = ["id", "sample"]

@@ -6,9 +6,9 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
-from data import MRNALoArmDataset, build_model_inputs
-from loss import mask_value_logits
-from model import LoArmConfig, LoArmTransformer
+from .data import MRNALoArmDataset, build_model_inputs
+from .loss import mask_value_logits
+from .model import LoArmConfig, LoArmTransformer
 
 
 def _sample_from_logits(logits, temperature=1.0, greedy=False):

@@ -9,7 +9,7 @@ from torch.optim import AdamW
 from tqdm import tqdm
 from dotenv import load_dotenv
 
-from models import MRNACsvDataset, MRNATransformer
+from .models import MRNACsvDataset, MRNATransformer
 
 def compute_validation_loss(args, model, valid_dataloader, global_step, device):
     model.eval()

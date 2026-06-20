@@ -6,7 +6,7 @@ import yaml
 
 import pandas as pd
 
-import plots
+from . import plots
 
 
 # Plot functions should take a DataFrame, save path, and optional config

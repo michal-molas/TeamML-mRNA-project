@@ -1,6 +1,5 @@
 import argparse
 import sys
-from pathlib import Path
 from dotenv import load_dotenv
 
 import numpy as np
@@ -12,10 +11,8 @@ from torch.optim import AdamW
 from tqdm import tqdm
 import wandb
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "RiboNN"))
-from RiboNN.src.model import RiboNN
-from models import MRNACsvDataset, MRNATransformer
+from .._ribonn_import import import_ribonn_model
+from .models import MRNACsvDataset, MRNATransformer
 
 RIBONN_MAX_UTR5_LEN = 1_381
 RIBONN_MAX_CDS_UTR3_LEN = 11_937
@@ -54,6 +51,7 @@ RIBONN_CONFIG = dict(
 def load_ribonn(weights_path, device, verbose=False):
     """Load frozen RiboNN weights from the submodule. Returns (model, RIBONN_MAX_TX_LEN)."""
 
+    RiboNN = import_ribonn_model()
     config = dict(RIBONN_CONFIG)
     model = RiboNN(**config)
 
