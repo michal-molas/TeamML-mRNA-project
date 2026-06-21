@@ -6,8 +6,6 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
@@ -16,8 +14,7 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 import wandb
 
-from .._ribonn_import import import_ribonn_model
-from ..common import MRNACsvDataset
+from ..common import MRNACsvDataset, RIBONN_CONFIG, RIBONN_MAX_TX_LEN, RiboNNEnsemble
 from .main import IndigoTransformer
 from .pretrain import (
     _extend_R,
@@ -38,85 +35,6 @@ def load_pretrained_weights(model, checkpoint_path, device):
     print(
         f"Loaded {checkpoint_path}  missing={len(missing)}  unexpected={len(unexpected)}"
     )
-
-
-# ============================================================
-# RiboNN configuration + ensemble (preloaded once)
-# ============================================================
-RIBONN_MAX_TX_LEN = 1_381 + 11_937  # 13318
-RIBONN_LEN_AFTER_CONV = 9
-
-RIBONN_CONFIG = dict(
-    with_NAs=False,
-    split_utr5_cds_utr3_channels=False,
-    label_codons=True,
-    label_utr5=False,
-    label_utr3=False,
-    label_splice_sites=False,
-    label_up_probs=False,
-    filters=64,
-    conv_stride=1,
-    conv_padding=0,
-    ln_epsilon=0.007,
-    dropout=0.3,
-    residual=False,
-    activation="relu",
-    kernel_size=5,
-    num_conv_layers=10,
-    len_after_conv=RIBONN_LEN_AFTER_CONV,
-    num_targets=78,
-    max_shift=0,
-    symmetric_shift=True,
-)
-
-
-def load_ribonn(weights_path, device, verbose=False):
-    RiboNN = import_ribonn_model()
-    model = RiboNN(**dict(RIBONN_CONFIG))
-    state_dict = torch.load(weights_path, map_location=device)
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    if verbose:
-        print(f"[ribonn] loaded {weights_path} missing={len(missing)} unexpected={len(unexpected)}", file=sys.stderr)
-    model.to(device).eval()
-    for p in model.parameters():
-        p.requires_grad = False
-    return model
-
-# copilot wrote this and says that this is faster than what we did (loading a new model in every iteration)
-class RiboNNEnsemble(torch.nn.Module):
-    """
-    Load top-k models per fold ONCE from a RiboNN runs.csv folder and average predictions.
-    """
-    def __init__(self, weights_folder, device, top_k=5, verbose=False):
-        super().__init__()
-        run_df = pd.read_csv(Path(weights_folder) / "runs.csv")
-
-        model_paths = []
-        for test_fold in np.sort(run_df["params.test_fold"].unique()):
-            tf_str = str(test_fold)
-            sub = run_df.query("`params.test_fold` == @tf_str or `params.test_fold` == @test_fold")
-            sub = sub.sort_values("metrics.val_r2", ascending=False).head(top_k)
-            for run_id in sub.run_id.tolist():
-                model_paths.append(Path(weights_folder) / run_id / "state_dict.pth")
-
-        if verbose:
-            print(f"[ribonn] ensemble size={len(model_paths)}", file=sys.stderr)
-
-        self.models = torch.nn.ModuleList([load_ribonn(str(p), device, verbose=verbose) for p in model_paths])
-        self.n = len(self.models)
-        if self.n == 0:
-            raise ValueError(f"No RiboNN models found in {weights_folder}")
-
-        self.eval()
-        for p in self.parameters():
-            p.requires_grad = False
-
-    def forward(self, ribonn_input):
-        acc = None
-        for m in self.models:
-            pred = m(ribonn_input)  # (B, 78)
-            acc = pred if acc is None else (acc + pred)
-        return acc / self.n
 
 
 # ============================================================

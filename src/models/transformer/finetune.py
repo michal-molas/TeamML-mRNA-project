@@ -2,8 +2,6 @@ import argparse
 import sys
 from dotenv import load_dotenv
 
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
@@ -11,66 +9,14 @@ from torch.optim import AdamW
 from tqdm import tqdm
 import wandb
 
-from .._ribonn_import import import_ribonn_model
-from ..common import MRNACsvDataset
-from .models import MRNATransformer
-
-RIBONN_MAX_UTR5_LEN = 1_381
-RIBONN_MAX_CDS_UTR3_LEN = 11_937
-RIBONN_MAX_TX_LEN = RIBONN_MAX_UTR5_LEN + RIBONN_MAX_CDS_UTR3_LEN  # 13318
-
-# len_after_conv: sequence length after all 10 conv+pool layers for a 13318-length input.
-# Derivation:
-#   1. initial_conv(k=5,p=0): 13318 -> 13314
-#   2. 10 × (conv(k=5,p=0) + maxpool(2,2)): 13314 -> 13310 -> 6655 -> 6651 -> 3325 -> 3321 -> 1660 -> 1656 -> 828 -> 824 -> 412 -> 408 -> 204 -> 200 -> 100 -> 96 -> 48 -> 44 -> 22 -> 18 -> 9
-RIBONN_LEN_AFTER_CONV = 9
-
-RIBONN_CONFIG = dict(
-    with_NAs=False, # conf.yml
-    split_utr5_cds_utr3_channels=False, # conf.yml
-    label_codons=True, # conf.yml
-    label_utr5=False, # conf.yml
-    label_utr3=False, # conf.yml
-    label_splice_sites=False, # conf.yml
-    label_up_probs=False, # conf.yml
-    filters=64, # conf.yml
-    conv_stride=1, # conf.yml
-    conv_padding=0, # conf.yml
-    ln_epsilon=0.007, # conf.yml
-    dropout=0.3, # conf.yml
-    residual=False, # conf.yml
-    activation = "relu", # Can be also silu/leakyrelu
-    kernel_size=5, # conf.yml
-    num_conv_layers=10, # conf.yml
-    len_after_conv=RIBONN_LEN_AFTER_CONV,
-    num_targets=78,  # 78 for human, 68 for mouse
-    max_shift=0, # conf.yml
-    symmetric_shift=True, # conf.yml
+from ..common import (
+    MRNACsvDataset,
+    RIBONN_CONFIG,
+    RIBONN_MAX_TX_LEN,
+    RIBONN_MAX_UTR5_LEN,
+    RiboNNEnsemble,
 )
-
-
-def load_ribonn(weights_path, device, verbose=False):
-    """Load frozen RiboNN weights from the submodule. Returns (model, RIBONN_MAX_TX_LEN)."""
-
-    RiboNN = import_ribonn_model()
-    config = dict(RIBONN_CONFIG)
-    model = RiboNN(**config)
-
-    state_dict = torch.load(weights_path, map_location=device)
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-
-    if verbose:
-        print(
-            f"[ribonn] loaded {weights_path}  missing={len(missing)}  unexpected={len(unexpected)}"
-        )
-
-    model.to(device)
-    model.eval()
-    for p in model.parameters():
-        p.requires_grad = False
-
-    return model, RIBONN_MAX_TX_LEN
-
+from .models import MRNATransformer
 
 def build_ribonn_input(
     lm_logits,
@@ -161,33 +107,6 @@ def load_pretrained_weights(model, checkpoint_path, device):
         f"Loaded {checkpoint_path}  missing={len(missing)}  unexpected={len(unexpected)}"
     )
 
-def ribonn_predict_using_nested_cross_validation_models(args, device, ribonn_input, batch_width):
-    ## RiboNN.src.predict.predict_using_nested_cross_validation_models() ##
-    RIBONN_COLUMNS = 78
-    run_df = pd.read_csv(args.ribonn_weights_folder + '/runs.csv') 
-    all_predictions = torch.zeros((batch_width, RIBONN_COLUMNS), device=device)
-    prediction_num = 0
-    for test_fold in np.sort(run_df["params.test_fold"].unique()):
-        test_fold_str = str(test_fold)
-        sub_run_df = run_df.query(
-            "`params.test_fold` == @test_fold_str or `params.test_fold` == @test_fold"
-        ).reset_index(drop=True)
-
-        ## RiboNN.src.predict.predict_using_models_trained_in_one_fold() ##
-        top_k_models_to_use = getattr(args, "top_k_models_to_use", 5)
-        sub_run_df = sub_run_df.sort_values("metrics.val_r2", ascending=False).head(top_k_models_to_use)
-
-        for run_id in sub_run_df.run_id:
-            # Create a new model
-            local_state_dict_path = f"{args.ribonn_weights_folder}/{run_id}/state_dict.pth"
-            ribonn_model, _ = load_ribonn(local_state_dict_path, device)
-            all_predictions += ribonn_model(ribonn_input)
-            prediction_num += 1
-
-    all_predictions /= prediction_num
-
-    return all_predictions
-
 def train(args, device):
 
     dataset = MRNACsvDataset(
@@ -224,8 +143,13 @@ def train(args, device):
 
     load_pretrained_weights(model, args.pretrained_path, device)
 
-    # ribonn_model, ribonn_max_len = load_ribonn(args.ribonn_weights, device)
-    _, ribonn_max_len = load_ribonn(args.ribonn_weights, device)
+    if not args.ribonn_weights_folder:
+        raise ValueError("--ribonn_weights_folder must be set for RiboNN fine-tuning")
+    ribonn_ensemble = RiboNNEnsemble(
+        args.ribonn_weights_folder,
+        device=device,
+        top_k=args.ribonn_top_k,
+    )
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
 
@@ -269,16 +193,11 @@ def train(args, device):
                 utr5_lens,
                 cds_lens,
                 utr3_lens,
-                ribonn_max_len,
+                RIBONN_MAX_TX_LEN,
                 label_codons=RIBONN_CONFIG["label_codons"],
             )
 
-            all_predictions = ribonn_predict_using_nested_cross_validation_models(
-                args=args,
-                device=device,
-                ribonn_input=ribonn_input,
-                batch_width=lm_logits.shape[0],
-            )
+            all_predictions = ribonn_ensemble(ribonn_input)
             # TODO: How to compare the TE to the label? 
             #       Can our model output results better than the data (then maybe relu)?
             #       Maybe we should just try to maximize the TE and ignore the label?
@@ -331,16 +250,11 @@ def train(args, device):
                     utr5_lens,
                     cds_lens,
                     utr3_lens,
-                    ribonn_max_len,
+                    RIBONN_MAX_TX_LEN,
                     label_codons=RIBONN_CONFIG["label_codons"],
                 )
 
-                all_predictions = ribonn_predict_using_nested_cross_validation_models(
-                    args=args,
-                    device=device,
-                    ribonn_input=ribonn_input,
-                    batch_width=lm_logits.shape[0],
-                )
+                all_predictions = ribonn_ensemble(ribonn_input)
                 val_te_sum += all_predictions.mean().item()
                 val_n += 1
 
@@ -381,17 +295,12 @@ def main():
     )
     parser.add_argument("--output_path", type=str, default=None)
     parser.add_argument(
-        "--ribonn_weights",
-        type=str,
-        default=None,
-        help="Path to a RiboNN state_dict.pth weight file",
-    )
-    parser.add_argument(
         "--ribonn_weights_folder",
         type=str,
         default=None,
-        help="Path to a RiboNN state_dict.pth weight file",
+        help="Path to a RiboNN runs.csv weights folder",
     )
+    parser.add_argument("--ribonn_top_k", type=int, default=5)
     parser.add_argument(
         "--lambda_ribonn",
         type=float,

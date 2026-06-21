@@ -20,8 +20,7 @@ time srun python3 finetune.py \
     --csv_path ../../data/finetuning/ribonn/dataset.csv \
     --pretrained_path model_state_dict/utr53_pretrained.pt \
     --output_path model_state_dict/finetuning_checkpoint.pt \
-    --ribonn_weights ../../RiboNN/models/human/0ad046d67ba7481881d5c7f918acedb4/state_dict.pth \
     --ribonn_weights_folder ../../RiboNN/models/human \
+    --ribonn_top_k 5 \
     --wandb
     
-
