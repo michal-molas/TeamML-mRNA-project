@@ -7,18 +7,70 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from ..common import MRNA_VOCAB, MRNATokenizer
+from ..common import MRNATokenizer, load_checkpoint
 from .models import MRNATransformer
 
 
 def load_pretrained_weights(model, checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
-    missing, unexpected = model.load_state_dict(state_dict, strict=True)
-    print(
-        f"Loaded {checkpoint_path}  missing={len(missing)}  unexpected={len(unexpected)}"
+    n_heads = model.transformer.layers[0].self_attn.num_heads
+    checkpoint = load_checkpoint(
+        checkpoint_path,
+        map_location=device,
+        expected_model_type="transformer",
+        legacy_config={"n_heads": n_heads},
     )
+    missing, unexpected = model.load_state_dict(
+        checkpoint.model_state_dict, strict=True
+    )
+    print(
+        f"Loaded {checkpoint_path} format={checkpoint.format_version} "
+        f"missing={len(missing)} unexpected={len(unexpected)}"
+    )
+    return checkpoint
+
+
+def _infer_legacy_tokenizer_config(vocab_size):
+    for only_utr5, special_count in ((False, 6), (True, 5)):
+        sequence_tokens = vocab_size - special_count
+        k = 1
+        while 4**k < sequence_tokens:
+            k += 1
+        if 4**k == sequence_tokens:
+            return {
+                "k": k,
+                "only_utr5": only_utr5,
+                "include_u_alias": k == 1,
+            }
+    raise ValueError(f"Cannot infer tokenizer from vocab_size={vocab_size}")
+
+
+def _load_checkpoint(path, device, legacy_n_heads=8):
+    checkpoint = load_checkpoint(
+        path,
+        map_location=device,
+        expected_model_type="transformer",
+        legacy_config={"n_heads": legacy_n_heads},
+    )
+    config = checkpoint.model_config
+    model = MRNATransformer(
+        vocab_size=config["vocab_size"],
+        d_model=config["d_model"],
+        nhead=config.get("n_heads", config.get("nhead")),
+        num_layers=config["num_layers"],
+        max_len=config["max_len"],
+    ).to(device)
+    model.load_state_dict(checkpoint.model_state_dict, strict=True)
+    model.eval()
+
+    tokenizer_config = checkpoint.tokenizer_config or _infer_legacy_tokenizer_config(
+        config["vocab_size"]
+    )
+    tokenizer = MRNATokenizer(
+        k=tokenizer_config.get("k", 1),
+        only_utr5=tokenizer_config.get("only_utr5", False),
+        include_u_alias=tokenizer_config.get("include_u_alias", True),
+    )
+    return model, tokenizer, checkpoint
 
 
 class MRNAInferenceSampler:
@@ -57,16 +109,11 @@ class MRNAInferenceSampler:
         self.cds_id = tokenizer.cds_id
         self.utr5_id = tokenizer.utr5_id
         self.utr3_id = tokenizer.utr3_id
-        self.nucleotide_ids = {
-            tokenizer.vocab["A"],
-            tokenizer.vocab["T"],
-            tokenizer.vocab["C"],
-            tokenizer.vocab["G"],
-        }
+        self.nucleotide_ids = set(range(tokenizer.pad_id))
 
     def tokenize_seq(self, seq: str) -> List[int]:
         seq = seq.upper()
-        invalid_chars = sorted({ch for ch in seq if ch not in self.vocab})
+        invalid_chars = sorted({ch for ch in seq if ch not in {"A", "U", "T", "C", "G"}})
         if invalid_chars:
             raise ValueError(f"Unknown nucleotide(s) {invalid_chars} in sequence: {seq}")
         return self.tokenizer.tokenize(seq)
@@ -210,12 +257,13 @@ def generate_samples(
     dataset: pd.DataFrame,
     samples_per_cds: int = 3,
     max_samples: int = None,
+    tokenizer: MRNATokenizer | None = None,
 ) -> pd.DataFrame:
     """
     For each CDS in the dataset, generate n_samples UTR sequences using the
     provided model.
     """
-    sampler = MRNAInferenceSampler(model)
+    sampler = MRNAInferenceSampler(model, tokenizer=tokenizer)
     all_samples = []
 
     if max_samples is not None:
@@ -281,17 +329,18 @@ def main() -> None:
     dataset = pd.read_csv(args.dataset_csv)
     print(f"Loaded dataset with {len(dataset)} samples from {args.dataset_csv}")
 
-    model = MRNATransformer(
-        vocab_size=len(set(MRNA_VOCAB.values())),
-        d_model=args.d_model,
-        nhead=args.nheads,
-        num_layers=args.n_layers,
-        max_len=args.max_len,
-    ).to(device)
-    load_pretrained_weights(model, args.model_path, device)
+    model, tokenizer, _ = _load_checkpoint(
+        args.model_path, device, legacy_n_heads=args.nheads
+    )
     print(f"Loaded model from {args.model_path}")
 
-    generated_samples_df = generate_samples(model, dataset, args.samples_per_cds, args.max_samples)
+    generated_samples_df = generate_samples(
+        model,
+        dataset,
+        args.samples_per_cds,
+        args.max_samples,
+        tokenizer=tokenizer,
+    )
     generated_samples_df.to_csv(args.output_csv, index=False)
     print(f"Saved generated samples to {args.output_csv}")
 

@@ -15,6 +15,8 @@ from ..common import (
     RIBONN_MAX_TX_LEN,
     RIBONN_MAX_UTR5_LEN,
     RiboNNEnsemble,
+    load_checkpoint,
+    save_checkpoint,
 )
 from .models import MRNATransformer
 
@@ -99,22 +101,48 @@ def build_ribonn_input(
 
 
 def load_pretrained_weights(model, checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
-    missing, unexpected = model.load_state_dict(state_dict, strict=True)
+    n_heads = model.transformer.layers[0].self_attn.num_heads
+    checkpoint = load_checkpoint(
+        checkpoint_path,
+        map_location=device,
+        expected_model_type="transformer",
+        legacy_config={"n_heads": n_heads},
+    )
+    missing, unexpected = model.load_state_dict(
+        checkpoint.model_state_dict, strict=True
+    )
     print(
-        f"Loaded {checkpoint_path}  missing={len(missing)}  unexpected={len(unexpected)}"
+        f"Loaded {checkpoint_path} format={checkpoint.format_version} "
+        f"missing={len(missing)} unexpected={len(unexpected)}"
     )
 
 def train(args, device):
+    pretrained_checkpoint = None
+    if args.pretrained_path:
+        pretrained_checkpoint = load_checkpoint(
+            args.pretrained_path,
+            map_location=device,
+            expected_model_type="transformer",
+            legacy_config={"n_heads": args.n_heads},
+        )
+    tokenizer_config = (
+        pretrained_checkpoint.tokenizer_config if pretrained_checkpoint else {}
+    )
+    dataset_k = tokenizer_config.get("k", 1)
+    only_utr5 = tokenizer_config.get("only_utr5", False)
+    if dataset_k != 1:
+        raise ValueError(
+            "RiboNN fine-tuning currently requires a nucleotide tokenizer (k=1); "
+            "k-mer expansion must be implemented before using this checkpoint"
+        )
 
     dataset = MRNACsvDataset(
         csv_path=args.csv_path,
         max_utr5_len=args.max_utr5_len,
         max_cds_len=args.max_cds_len,
         max_utr3_len=args.max_utr3_len,
-        k=1, # set this as default to match pretrained, TODO: pass as param
+        k=dataset_k,
+        only_utr5=only_utr5,
     )
 
     dataset_size = len(dataset)
@@ -133,15 +161,36 @@ def train(args, device):
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
 
+    model_config = (
+        dict(pretrained_checkpoint.model_config)
+        if pretrained_checkpoint
+        else {
+            "vocab_size": dataset.vocab_size,
+            "d_model": args.d_model,
+            "n_heads": args.n_heads,
+            "num_layers": args.n_layers,
+            "max_len": dataset.max_len,
+        }
+    )
+    if dataset.vocab_size != model_config["vocab_size"]:
+        raise ValueError(
+            f"Fine-tuning dataset vocab_size={dataset.vocab_size} does not match "
+            f"checkpoint vocab_size={model_config['vocab_size']}"
+        )
+    if dataset.max_len > model_config["max_len"]:
+        raise ValueError(
+            f"Fine-tuning dataset max_len={dataset.max_len} exceeds "
+            f"checkpoint max_len={model_config['max_len']}"
+        )
     model = MRNATransformer(
-        vocab_size=dataset.vocab_size,
-        d_model=args.d_model,
-        nhead=args.n_heads,
-        num_layers=args.n_layers,
-        max_len=dataset.max_len,
+        vocab_size=model_config["vocab_size"],
+        d_model=model_config["d_model"],
+        nhead=model_config.get("n_heads", model_config.get("nhead")),
+        num_layers=model_config["num_layers"],
+        max_len=model_config["max_len"],
     ).to(device)
-
-    load_pretrained_weights(model, args.pretrained_path, device)
+    if pretrained_checkpoint:
+        model.load_state_dict(pretrained_checkpoint.model_state_dict, strict=True)
 
     if not args.ribonn_weights_folder:
         raise ValueError("--ribonn_weights_folder must be set for RiboNN fine-tuning")
@@ -271,14 +320,37 @@ def train(args, device):
         if args.wandb:
             wandb.log({"val/lm_loss": val_lm, "val/te": val_te}, step=global_step)
 
-        def _save_checkpoint(checkpoint_name = ""):
-            torch.save({"model_state_dict": model.state_dict()}, args.output_path + checkpoint_name)
-            print(f"[checkpoint] saved → {args.output_path}")
+        def _save_checkpoint(checkpoint_name=""):
+            output_path = args.output_path + checkpoint_name
+            save_checkpoint(
+                output_path,
+                model_type="transformer",
+                model_config=model_config,
+                model_state_dict=model.state_dict(),
+                tokenizer_config={
+                    "k": dataset.tokenizer.k,
+                    "only_utr5": dataset.tokenizer.only_utr5,
+                    "include_u_alias": dataset.tokenizer.include_u_alias,
+                },
+                data_config={
+                    "max_utr5_len": args.max_utr5_len,
+                    "max_cds_len": args.max_cds_len,
+                    "max_utr3_len": args.max_utr3_len,
+                },
+                training={
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "best_val_loss": best_val_lm,
+                    "fine_tuned_with_ribonn": True,
+                    "lambda_ribonn": args.lambda_ribonn,
+                },
+            )
+            print(f"[checkpoint] saved → {output_path}")
 
-        if val_lm < best_val_lm:
+        if args.output_path and val_lm < best_val_lm:
             best_val_lm = val_lm
             _save_checkpoint()
-        elif epoch % 20:
+        elif args.output_path and epoch % 20:
             _save_checkpoint(f"_epoch{epoch}")
 
 

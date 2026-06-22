@@ -20,26 +20,18 @@ from tqdm import tqdm
 
 
 from src.models.indigo import IndigoTransformer
-from src.models.common import MRNA_VOCAB, MRNACsvDataset
+from src.models.common import MRNACsvDataset, load_checkpoint
 from src.models.lo_arm.data import MRNALoArmDataset
 from src.models.lo_arm.generate import _load_checkpoint as _load_loarm_checkpoint
 from src.models.lo_arm.generate import sample_from_cds as loarm_sample_from_cds
-from src.models.transformer.generate import MRNAInferenceSampler
-from src.models.transformer.models import MRNATransformer
+from src.models.transformer.generate import (
+    MRNAInferenceSampler,
+    _load_checkpoint as _load_transformer_checkpoint,
+)
 
 
 INPUT_COLS = ["id", "utr5", "cds", "utr3"]
 OUTPUT_COLS = ["id", "sample", "utr5", "cds", "utr3"]
-
-
-def load_pretrained_weights(model, checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
-    missing, unexpected = model.load_state_dict(state_dict, strict=True)
-    print(
-        f"Loaded {checkpoint_path}  missing={len(missing)}  unexpected={len(unexpected)}"
-    )
 
 
 def _device() -> torch.device:
@@ -93,15 +85,12 @@ def _generate_transformer(
     input_df: pd.DataFrame,
     device: torch.device
 ) -> list[dict[str, str]]:
-    model = MRNATransformer(
-        vocab_size=len(set(MRNA_VOCAB.values())),
-        d_model=args.d_model,
-        nhead=args.n_heads,
-        num_layers=args.n_layers,
-        max_len=args.max_len,
-    ).to(device)
-    load_pretrained_weights(model, args.checkpoint_path, device)
-    sampler = MRNAInferenceSampler(model, max_len=args.max_len, device=device)
+    model, tokenizer, _ = _load_transformer_checkpoint(
+        args.checkpoint_path,
+        device,
+        legacy_n_heads=args.n_heads,
+    )
+    sampler = MRNAInferenceSampler(model, device=device, tokenizer=tokenizer)
 
     # TODO: batched inference
     rows = []
@@ -127,11 +116,6 @@ def _generate_transformer(
     return rows
 
 
-def _checkpoint_state_dict(checkpoint) -> dict[str, torch.Tensor]:
-    state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-    return {key.replace("module.", "", 1): value for key, value in state_dict.items()}
-
-
 def _coalesce(*values):
     for value in values:
         if value is not None:
@@ -139,9 +123,9 @@ def _coalesce(*values):
     return None
 
 
-def _loarm_dataset_kwargs(args: argparse.Namespace, checkpoint: dict) -> dict:
-    data_cfg = checkpoint.get("data", {}) if isinstance(checkpoint, dict) else {}
-    tokenizer_cfg = checkpoint.get("tokenizer", {}) if isinstance(checkpoint, dict) else {}
+def _loarm_dataset_kwargs(args: argparse.Namespace, checkpoint) -> dict:
+    data_cfg = checkpoint.data_config
+    tokenizer_cfg = checkpoint.tokenizer_config
     return {
         "max_utr5_len": _coalesce(args.max_utr5_len, data_cfg.get("max_utr5_len"), 200),
         "max_cds_len": _coalesce(args.max_cds_len, data_cfg.get("max_cds_len"), 500),
@@ -188,33 +172,16 @@ def _generate_loarm(args: argparse.Namespace, device: torch.device) -> list[dict
     return rows
 
 
-def _infer_indigo_config(state_dict: dict[str, torch.Tensor]) -> SimpleNamespace:
-    token_embedding = state_dict["encoder.embedding_layer.token_embedding.weight"]
-    position_embedding = state_dict["encoder.embedding_layer.position_embedding.weight"]
-    rel_pos_embedding = state_dict["encoder.blocks.0.attention_layer.relative_positional_embedding.weight"]
-    layer_indices = {
-        int(key.split(".")[2])
-        for key in state_dict
-        if key.startswith("encoder.blocks.") and key.split(".")[2].isdigit()
-    }
-    d_model = token_embedding.shape[1]
-    d_head = rel_pos_embedding.shape[1]
-    return SimpleNamespace(
-        vocab_size=token_embedding.shape[0],
-        d_model=d_model,
-        num_heads=d_model // d_head,
-        num_layers=max(layer_indices) + 1,
-        max_len=position_embedding.shape[0],
+def _load_indigo_checkpoint(path: str, device: torch.device):
+    checkpoint = load_checkpoint(
+        path,
+        map_location=device,
+        expected_model_type="indigo",
     )
-
-
-def _load_indigo_checkpoint(path: str, device: torch.device) -> IndigoTransformer:
-    checkpoint = torch.load(path, map_location=device)
-    state_dict = _checkpoint_state_dict(checkpoint)
-    model = IndigoTransformer(_infer_indigo_config(state_dict)).to(device)
-    model.load_state_dict(state_dict)
+    model = IndigoTransformer(SimpleNamespace(**checkpoint.model_config)).to(device)
+    model.load_state_dict(checkpoint.model_state_dict, strict=True)
     model.eval()
-    return model
+    return model, checkpoint
 
 
 def _build_indigo_R(prefix_len: int, generated_count: int, ordered_steps: list[int], device: torch.device):
@@ -341,13 +308,15 @@ class IndigoSampler:
         return self._parse_target(final_tokens)
 
 
-def _indigo_dataset_kwargs(args: argparse.Namespace) -> dict:
+def _indigo_dataset_kwargs(args: argparse.Namespace, checkpoint) -> dict:
+    data_cfg = checkpoint.data_config
+    tokenizer_cfg = checkpoint.tokenizer_config
     return {
-        "max_utr5_len": _coalesce(args.max_utr5_len, 200),
-        "max_cds_len": _coalesce(args.max_cds_len, 500),
-        "max_utr3_len": _coalesce(args.max_utr3_len, 200),
-        "k": _coalesce(args.k, 3),
-        "only_utr5": False,
+        "max_utr5_len": _coalesce(args.max_utr5_len, data_cfg.get("max_utr5_len"), 200),
+        "max_cds_len": _coalesce(args.max_cds_len, data_cfg.get("max_cds_len"), 500),
+        "max_utr3_len": _coalesce(args.max_utr3_len, data_cfg.get("max_utr3_len"), 200),
+        "k": _coalesce(args.k, tokenizer_cfg.get("k"), 3),
+        "only_utr5": tokenizer_cfg.get("only_utr5", False),
     }
 
 
@@ -356,8 +325,10 @@ def _generate_indigo(
     input_df: pd.DataFrame,
     device: torch.device,
 ) -> list[dict[str, str]]:
-    model = _load_indigo_checkpoint(args.checkpoint_path, device)
-    dataset = MRNACsvDataset(args.input_csv, **_indigo_dataset_kwargs(args))
+    model, checkpoint = _load_indigo_checkpoint(args.checkpoint_path, device)
+    dataset = MRNACsvDataset(
+        args.input_csv, **_indigo_dataset_kwargs(args, checkpoint)
+    )
     max_target_tokens = model.config.max_len - (2 + dataset.max_cds_tokens + 1)
     if max_target_tokens <= 0:
         raise ValueError("INDIGO checkpoint max_len is too short for the configured CDS prefix.")

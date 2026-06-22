@@ -14,7 +14,14 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 import wandb
 
-from ..common import MRNACsvDataset, RIBONN_CONFIG, RIBONN_MAX_TX_LEN, RiboNNEnsemble
+from ..common import (
+    MRNACsvDataset,
+    RIBONN_CONFIG,
+    RIBONN_MAX_TX_LEN,
+    RiboNNEnsemble,
+    load_checkpoint,
+    save_checkpoint,
+)
 from .main import IndigoTransformer
 from .pretrain import (
     _extend_R,
@@ -28,12 +35,17 @@ from .pretrain import (
 )
 
 def load_pretrained_weights(model, checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    checkpoint = load_checkpoint(
+        checkpoint_path,
+        map_location=device,
+        expected_model_type="indigo",
+    )
+    missing, unexpected = model.load_state_dict(
+        checkpoint.model_state_dict, strict=False
+    )
     print(
-        f"Loaded {checkpoint_path}  missing={len(missing)}  unexpected={len(unexpected)}"
+        f"Loaded {checkpoint_path} format={checkpoint.format_version} "
+        f"missing={len(missing)} unexpected={len(unexpected)}"
     )
 
 
@@ -436,12 +448,30 @@ def compute_indigo_loss_with_ribonn(model, batch, device, ribonn_ens=None, lambd
 # Training / validation loops
 # ============================================================
 def train(args, device):
+    pretrained_checkpoint = None
+    if args.pretrained_path:
+        pretrained_checkpoint = load_checkpoint(
+            args.pretrained_path,
+            map_location=device,
+            expected_model_type="indigo",
+        )
+    tokenizer_config = (
+        pretrained_checkpoint.tokenizer_config if pretrained_checkpoint else {}
+    )
+    dataset_k = tokenizer_config.get("k", 3)
+    only_utr5 = tokenizer_config.get("only_utr5", False)
+    if args.lambda_ribonn > 0 and dataset_k != 1:
+        raise ValueError(
+            "RiboNN fine-tuning currently requires a nucleotide tokenizer (k=1); "
+            "k-mer expansion must be implemented before using this checkpoint"
+        )
     dataset = MRNACsvDataset(
         csv_path=args.csv_path,
         max_utr5_len=args.max_utr5_len,
         max_cds_len=args.max_cds_len,
         max_utr3_len=args.max_utr3_len,
-        only_utr5=False,
+        only_utr5=only_utr5,
+        k=dataset_k,
     )
 
     # Optional: small subset for local sanity runs
@@ -461,25 +491,38 @@ def train(args, device):
     print(f"Train dataset length: {len(train_dataset)}", file=sys.stderr)
     print(f"Validation dataset length: {len(val_dataset)}", file=sys.stderr)
 
-    # Indigo model config (matches your indigo code style)
-    config = SimpleNamespace(
-        vocab_size=dataset.dataset.vocab_size if hasattr(dataset, "dataset") else dataset.vocab_size,
-        d_model=args.d_model,
-        num_heads=args.n_heads,
-        num_layers=args.n_layers,
-        max_len=(dataset.dataset.max_len if hasattr(dataset, "dataset") else dataset.max_len),
+    ds_obj = dataset.dataset if hasattr(dataset, "dataset") else dataset
+    model_config = (
+        dict(pretrained_checkpoint.model_config)
+        if pretrained_checkpoint
+        else {
+            "vocab_size": ds_obj.vocab_size,
+            "d_model": args.d_model,
+            "num_heads": args.n_heads,
+            "num_layers": args.n_layers,
+            "max_len": ds_obj.max_len,
+        }
     )
+    if ds_obj.vocab_size != model_config["vocab_size"]:
+        raise ValueError(
+            f"Fine-tuning dataset vocab_size={ds_obj.vocab_size} does not match "
+            f"checkpoint vocab_size={model_config['vocab_size']}"
+        )
+    if ds_obj.max_len > model_config["max_len"]:
+        raise ValueError(
+            f"Fine-tuning dataset max_len={ds_obj.max_len} exceeds "
+            f"checkpoint max_len={model_config['max_len']}"
+        )
+    config = SimpleNamespace(**model_config)
     model = IndigoTransformer(config).to(device)
-    
-    if args.pretrained_path is not None:
-        load_pretrained_weights(model, args.pretrained_path, device)
+    if pretrained_checkpoint:
+        model.load_state_dict(pretrained_checkpoint.model_state_dict, strict=False)
     else:
         print("No path to pretrained model given: training from scratch.")
 
     optimizer = AdamW(model.parameters(), lr=args.learning_rate)
 
     # dataset pad/eos
-    ds_obj = dataset.dataset if hasattr(dataset, "dataset") else dataset
     pad_id = ds_obj.pad_id
     eos_id = ds_obj.eos_id
 
@@ -602,14 +645,39 @@ def train(args, device):
         if args.wandb:
             wandb.log({"val/loss": val_loss}, step=global_step)
 
-        # checkpoint
+        def _save_checkpoint(output_path):
+            save_checkpoint(
+                output_path,
+                model_type="indigo",
+                model_config=model_config,
+                model_state_dict=model.state_dict(),
+                tokenizer_config={
+                    "k": ds_obj.tokenizer.k,
+                    "only_utr5": ds_obj.tokenizer.only_utr5,
+                    "include_u_alias": ds_obj.tokenizer.include_u_alias,
+                },
+                data_config={
+                    "max_utr5_len": args.max_utr5_len,
+                    "max_cds_len": args.max_cds_len,
+                    "max_utr3_len": args.max_utr3_len,
+                },
+                training={
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "best_val_loss": best_val,
+                    "generation_order": args.gen_order,
+                    "fine_tuned_with_ribonn": args.lambda_ribonn > 0,
+                    "lambda_ribonn": args.lambda_ribonn,
+                },
+            )
+            print(f"[checkpoint] saved → {output_path}", file=sys.stderr)
+
         if args.output_path and val_loss < best_val:
             best_val = val_loss
-            torch.save({"model_state_dict": model.state_dict()}, args.output_path)
-            print(f"[checkpoint] saved → {args.output_path}", file=sys.stderr)
+            _save_checkpoint(args.output_path)
         elif args.output_path and (epoch % args.save_every == 0):
-            torch.save({"model_state_dict": model.state_dict()}, args.output_path + f"_epoch{epoch}")
-            print(f"[checkpoint] saved → {args.output_path}_epoch{epoch}", file=sys.stderr)
+            epoch_path = args.output_path + f"_epoch{epoch}"
+            _save_checkpoint(epoch_path)
 
 
 def main():

@@ -15,7 +15,7 @@ from tqdm import tqdm
 from dotenv import load_dotenv
 from types import SimpleNamespace
 
-from ..common import MRNACsvDataset
+from ..common import MRNACsvDataset, save_checkpoint
 from .main import IndigoTransformer
 
 
@@ -825,8 +825,28 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
 
         if args.output_path and epoch_loss < best_loss and rank == 0:
             best_loss = epoch_loss
-            state_dict = model.state_dict()
-            torch.save({"model_state_dict": state_dict}, args.output_path)
+            save_checkpoint(
+                args.output_path,
+                model_type="indigo",
+                model_config=vars(config),
+                model_state_dict=model.state_dict(),
+                tokenizer_config={
+                    "k": dataset.tokenizer.k,
+                    "only_utr5": dataset.tokenizer.only_utr5,
+                    "include_u_alias": dataset.tokenizer.include_u_alias,
+                },
+                data_config={
+                    "max_utr5_len": args.max_utr5_len,
+                    "max_cds_len": args.max_cds_len,
+                    "max_utr3_len": args.max_utr3_len,
+                },
+                training={
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "best_train_loss": best_loss,
+                    "generation_order": args.gen_order,
+                },
+            )
 
         val_loss = compute_validation_loss(
             args, model, val_dataset, pad_id, eos_id, batch_size, device,
