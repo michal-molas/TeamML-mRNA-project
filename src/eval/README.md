@@ -128,3 +128,15 @@ After generation completes, set the matching evaluation and model names in
 
 Repeat those submissions for each model. Once every scoring job is complete,
 run step 3 from the repository root to generate the comparison plots.
+
+### Example plotting data
+
+A two-model example with 100 real sequence rows per model is included in
+`data/evals/example`. Generate its plots without running generation or scoring
+first:
+
+```bash
+python src/eval/generate_plots.py data/evals/example
+```
+
+The results are written to `data/evals/example/eval_plots/`.
