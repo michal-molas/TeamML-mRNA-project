@@ -1,111 +1,142 @@
-# Eval
+# Evaluation
 
-Local commands below are run from the repository root unless noted otherwise.
+Evaluation is an explicit three-step process:
+
+1. Generate sequences for each model.
+2. Score each model's sequences.
+3. Generate plots and comparison tables across all scored models.
+
+Run the commands below from the repository root.
+
+## Directory layout
+
+Each evaluation has one subdirectory per model. Generation and scoring create the
+two files consumed by the plotting step:
+
+```text
+data/evals/<evaluation>/
+  <model>/
+    sequences.csv
+    scores.csv
+  eval_plots/
+```
+
+`eval_plots/` is created by step 3. Repeat steps 1 and 2 with another `<model>`
+directory to include that model in the comparison.
+
+The examples below use:
+
+```bash
+EVAL_DIR=data/evals/my_eval
+MODEL=transformer_pretrained
+```
 
 ## 1. Generate samples
 
-Input CSV must have these columns:
+The input CSV must contain:
 
 ```text
 id,utr5,cds,utr3
 ```
 
-Generate an eval-ready CSV:
+Generate one ground-truth row and five model samples per input sequence:
 
 ```bash
-python src/eval/generate_samples.py transformer CHECKPOINT.pt input.csv data/generated/samples.csv \
+python src/eval/generate_samples.py \
+  transformer \
+  data/models/utr53_pretrained.pt \
+  data/pretraining/small_test.csv \
+  "$EVAL_DIR/$MODEL/sequences.csv" \
   --samples_per_cds 5 \
   --max_samples 100
 ```
 
-`model_type` can be `transformer`, `indigo`, or `loarm`.
-
-The output CSV has:
+`model_type` can be `transformer`, `indigo`, or `loarm`. The generated
+`sequences.csv` contains:
 
 ```text
 id,sample,utr5,cds,utr3
 ```
 
-It contains one ground-truth row per input sequence with `sample=gt`, plus generated rows like `sample_0`, `sample_1`, etc.
+For each input row it contains `sample=gt` plus generated rows named
+`sample_0`, `sample_1`, and so on.
 
-### Generate on a cluster
+## 2. Score sequences
 
-Use the SLURM script:
-
-```bash
-cd src/eval
-./slurm_wrap.py sbatch submit.sub
-```
-
-Before submitting, edit the generation command in `submit.sub`, for example:
+[`configs/default.yml`](configs/default.yml) contains reusable scorer settings.
+Input and output paths are passed on the command line so the same configuration
+can score every model:
 
 ```bash
-srun python3 generate_samples.py \
-  transformer \
-  ../../data/models/utr53_pretrained.pt \
-  ../../data/pretraining/small_test.csv \
-  ../../data/generated/samples.csv \
-  --samples_per_cds 3 \
-  --max_samples 20
-```
-
-The paths above are relative to `src/eval`, because the job is submitted from that directory.
-
-## 2. Score with RiboNN
-
-Create or edit a config YAML, for example `src/eval/configs/ribonn.yml`:
-
-```yaml
-samples_csv: data/generated/samples.csv
-eval_dir: data/evals/my_eval
-
-scorers:
-  ribonn:
-    weights_folder: RiboNN/models/human
-    top_k_models_to_use: 5
-```
-
-Run scoring:
-
-```bash
-python src/eval/score_sequences.py --config src/eval/configs/ribonn.yml
+python src/eval/score_sequences.py \
+  --config src/eval/configs/default.yml \
+  --samples_csv "$EVAL_DIR/$MODEL/sequences.csv" \
+  --save_dir "$EVAL_DIR/$MODEL"
 ```
 
 This writes:
 
 ```text
-data/evals/my_eval/scores.csv
+data/evals/my_eval/transformer_pretrained/scores.csv
 ```
 
-### Default config example
+To compare another model, choose a new `MODEL` name and repeat steps 1 and 2.
+Every model directory must contain both `sequences.csv` and `scores.csv`.
 
-The checked-in default config is `src/eval/configs/default.yml`. It already contains `samples_csv`, `eval_dir`, `string_statistics`, and `ribonn` settings.
+## 3. Generate plots
 
-To run scoring and aggregation with it:
+Run the plotting entry point once for the evaluation root:
 
 ```bash
-cd src/eval
-python run_eval.py --config configs/default.yml
+python src/eval/generate_plots.py "$EVAL_DIR"
 ```
 
-This writes results to the `eval_dir` set in `configs/default.yml`.
-
-## 3. Aggregate scores
-
-Run:
-
-```bash
-python src/eval/calculate_statistics.py \
-  --config src/eval/configs/ribonn.yml \
-  --scores_csv data/evals/my_eval/scores.csv \
-  --output_dir data/evals/my_eval
-```
-
-This writes aggregate CSV files such as:
+It discovers every model subdirectory containing both required CSV files and
+writes results under `$EVAL_DIR/eval_plots/`:
 
 ```text
-data/evals/my_eval/gt_global_stats.csv
-data/evals/my_eval/generated_global_stats.csv
-data/evals/my_eval/gt_cds_stats.csv
-data/evals/my_eval/generated_cds_stats.csv
+eval_plots/
+  metrics.csv
+  summary.csv
+  te_improvements.csv
+  sequence_diversity.csv
+  sequence_diversity_summary.csv
+  per_model/
+  merged/
 ```
+
+The outputs include normalized sequence and predicted-TE metrics, cohort
+summaries, mean and best TE improvements over ground truth, sequence-diversity
+statistics, per-model plots, and merged model-comparison plots.
+
+## SLURM
+
+Edit the configuration block in `src/eval/submit_generate.sub`, including the
+evaluation name, model name, checkpoint, input path, and sampling parameters.
+Then submit it without command-line arguments:
+
+```bash
+./slurm_wrap.py src/eval/submit_generate.sub
+```
+
+After generation completes, set the matching evaluation and model names in
+`src/eval/submit_eval.sub`, then submit scoring:
+
+```bash
+./slurm_wrap.py src/eval/submit_eval.sub
+```
+
+Repeat those submissions for each model. Once every scoring job is complete,
+run step 3 from the repository root to generate the comparison plots.
+
+### Example plotting data
+
+A two-model example with 100 real sequence rows per model is included in
+`data/evals/example`. Generate its plots without running generation or scoring
+first:
+
+```bash
+python src/eval/generate_plots.py data/evals/example
+```
+
+The results are written to `data/evals/example/eval_plots/`.
