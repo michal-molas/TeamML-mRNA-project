@@ -1,27 +1,10 @@
-samples_csv: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/generated/20260609/transformer_pretrained.csv
-# samples_csv: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/generated/20260609/transformer_finetuned.csv
-# samples_csv: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/generated/20260609/indigo_pretrained.csv
-# samples_csv: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/generated/20260609/indigo_finetuned.csv
-# samples_csv: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/generated/20260609/loarm_pretrained.csv
-
-eval_dir: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/evals/20260609/transformer_pretrained
-# eval_dir: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/evals/20260609/transformer_finetuned
-# eval_dir: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/evals/20260609/indigo_pretrained
-# eval_dir: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/evals/20260609/indigo_finetuned
-# eval_dir: /p/project1/hai_1223/olejnik1/TeamML-mRNA-project/data/evals/20260609/loarm_pretrained
-
 scorers:
   string_statistics: {}
   ribonn:
-    # weights_path: ../../RiboNN/models/human/a569cb3e25b24729aa634dfc0c58635c/state_dict.pth
-    weights_folder: ../../RiboNN/models/human
+    # Paths are resolved from the working directory. Eval commands are run from
+    # the repository root, so this points into the RiboNN submodule.
+    weights_folder: RiboNN/models/human
     top_k_models_to_use: 5
     # batch_size: 32
   # utrlm: {}
   # rnafold: {}
-
-plots:
-  gt_vs_generated_distribution:
-    metrics: {}
-
-# max_samples: 50

@@ -1,18 +1,27 @@
 #!/bin/bash -x
-#SBATCH --account=hai_1223  	 	     # Account details
+#SBATCH --account=hai_1223
 #SBATCH --cpus-per-task=48
-#SBATCH --gres=gpu:1                     # Use the 1 GPU available
-#SBATCH --output=out/output.%j               # File for standard output
-#SBATCH --error=err/error.%j                 # File for standard error
-#SBATCH --time=02:00:00                  # Maximum runtime
-#SBATCH --partition=booster              # Specified machine partition
+#SBATCH --gres=gpu:1
+#SBATCH --output=out/score.%j.out
+#SBATCH --error=err/score.%j.err
+#SBATCH --time=02:00:00
+#SBATCH --partition=booster
 
-# To get number of cpu per task
 export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
 
-# activate env
-source ../../venv_setup/activate.sh
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
+source "$REPO_ROOT/../venv_setup/activate.sh"
+cd "$REPO_ROOT"
 
-# run script
-srun python3 score_sequences.py \
-    --config configs/default.yml \
+# Edit these values before submitting the job. EVAL_NAME and MODEL_NAME must
+# match the generation job.
+EVAL_NAME="my_eval"
+MODEL_NAME="transformer_pretrained"
+SCORER_CONFIG="src/eval/configs/default.yml"
+
+MODEL_DIR="data/evals/$EVAL_NAME/$MODEL_NAME"
+
+srun python3 src/eval/score_sequences.py \
+    --config "$SCORER_CONFIG" \
+    --samples_csv "$MODEL_DIR/sequences.csv" \
+    --save_dir "$MODEL_DIR"
