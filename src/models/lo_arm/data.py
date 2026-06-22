@@ -1,69 +1,26 @@
 import math
-from itertools import product
 
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from ..common.data import MRNATokenizer
 
-class LoArmTokenizer:
+
+class LoArmTokenizer(MRNATokenizer):
     """K-mer tokenizer with a distinct LO-ARM sampling mask token."""
 
     def __init__(self, k=3, only_utr5=False):
-        self.k = k
-        self.only_utr5 = only_utr5
-
-        kmers = ["".join(p) for p in product("ATCG", repeat=k)]
-        self.vocab = {kmer: i for i, kmer in enumerate(kmers)}
-
-        n_kmer = len(self.vocab)
-        self.vocab["<PAD>"] = n_kmer
-        self.vocab["<BOS>"] = n_kmer + 1
-        self.vocab["<EOS>"] = n_kmer + 2
-        self.vocab["<CDS>"] = n_kmer + 3
-        self.vocab["<UTR5>"] = n_kmer + 4
-        if not only_utr5:
-            self.vocab["<UTR3>"] = n_kmer + 5
-            self.vocab["<MASK>"] = n_kmer + 6
-        else:
-            self.vocab["<MASK>"] = n_kmer + 5
-
-        self.id_to_token = {idx: tok for tok, idx in self.vocab.items()}
-        self.vocab_size = len(self.vocab)
-
-        self.pad_id = self.vocab["<PAD>"]
-        self.bos_id = self.vocab["<BOS>"]
-        self.eos_id = self.vocab["<EOS>"]
-        self.cds_id = self.vocab["<CDS>"]
-        self.utr5_id = self.vocab["<UTR5>"]
-        self.utr3_id = self.vocab.get("<UTR3>")
-        self.mask_id = self.vocab["<MASK>"]
-        self.special_ids = {
-            self.pad_id,
-            self.bos_id,
-            self.eos_id,
-            self.cds_id,
-            self.utr5_id,
-            self.mask_id,
-        }
-        if self.utr3_id is not None:
-            self.special_ids.add(self.utr3_id)
-
-    def tokenize(self, seq):
-        seq = str(seq).upper().replace("U", "T")
-        return [
-            self.vocab.get(seq[i : i + self.k], self.pad_id)
-            for i in range(0, len(seq) - self.k + 1, self.k)
-        ]
-
-    def detokenize(self, ids):
-        parts = []
-        for idx in ids:
-            idx = int(idx)
-            if idx in self.special_ids:
-                continue
-            parts.append(self.id_to_token.get(idx, ""))
-        return "".join(parts)
+        super().__init__(
+            k=k,
+            only_utr5=only_utr5,
+            include_u_alias=False,
+        )
+        self.mask_id = self.vocab_size
+        self.vocab["<MASK>"] = self.mask_id
+        self.id_to_token[self.mask_id] = "<MASK>"
+        self.special_ids.add(self.mask_id)
+        self.vocab_size += 1
 
 
 class MRNALoArmDataset(Dataset):
