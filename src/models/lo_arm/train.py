@@ -13,9 +13,10 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 import wandb
 
-from data import MRNALoArmDataset
-from loss import compute_lo_arm_loss
-from model import LoArmConfig, LoArmTransformer
+from ..common import save_checkpoint
+from .data import MRNALoArmDataset
+from .loss import compute_lo_arm_loss
+from .model import LoArmConfig, LoArmTransformer
 
 
 def _to_device(batch, device):
@@ -232,23 +233,6 @@ def _wandb_validation_metrics(val_metrics):
     return logs
 
 
-def _checkpoint_payload(model, config, args, dataset):
-    return {
-        "model_state_dict": _unwrap_model(model).state_dict(),
-        "config": config.to_dict(),
-        "tokenizer": {
-            "k": args.k,
-            "vocab": dataset.vocab,
-            "mask_id": dataset.mask_id,
-        },
-        "data": {
-            "max_utr5_len": args.max_utr5_len,
-            "max_cds_len": args.max_cds_len,
-            "max_utr3_len": args.max_utr3_len,
-        },
-    }
-
-
 def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
     train_dataset = MRNALoArmDataset(
         args.train_csv_path,
@@ -369,9 +353,26 @@ def train(args, device, rank=0, world_size=1, distributed=False, local_rank=0):
 
         if args.output_path and val_loss < best_val and rank == 0:
             best_val = val_loss
-            torch.save(
-                _checkpoint_payload(model, config, args, train_dataset),
+            save_checkpoint(
                 args.output_path,
+                model_type="lo_arm",
+                model_config=config,
+                model_state_dict=_unwrap_model(model).state_dict(),
+                tokenizer_config={
+                    "k": train_dataset.tokenizer.k,
+                    "only_utr5": train_dataset.tokenizer.only_utr5,
+                    "mask_id": train_dataset.mask_id,
+                },
+                data_config={
+                    "max_utr5_len": args.max_utr5_len,
+                    "max_cds_len": args.max_cds_len,
+                    "max_utr3_len": args.max_utr3_len,
+                },
+                training={
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "best_negative_elbo": best_val,
+                },
             )
             print(f"[checkpoint] saved {args.output_path}", file=sys.stderr)
 

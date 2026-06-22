@@ -122,14 +122,14 @@ id,sample,cds,utr5,utr3
 Quick smoke training:
 
 ```bash
-src/lo_arm/run_train.sh
+src/models/lo_arm/run_train.sh
 ```
 
 Quick smoke generation, using the checkpoint produced by the smoke training
 script:
 
 ```bash
-src/lo_arm/run_generate.sh
+src/models/lo_arm/run_generate.sh
 ```
 
 The wrappers are intentionally small and can be configured with environment
@@ -147,7 +147,7 @@ D_MODEL=256 \
 N_HEADS=8 \
 BATCH_SIZE=16 \
 EPOCHS=5 \
-src/lo_arm/run_train.sh
+src/models/lo_arm/run_train.sh
 ```
 
 ```bash
@@ -159,14 +159,14 @@ MAX_SAMPLES=100 \
 MAX_UTR5_LEN=200 \
 MAX_CDS_LEN=500 \
 MAX_UTR3_LEN=200 \
-src/lo_arm/run_generate.sh
+src/models/lo_arm/run_generate.sh
 ```
 
 Direct module entrypoints are also available:
 
 ```bash
-PYTHONPATH=src venv/bin/python -m lo_arm.train --help
-PYTHONPATH=src venv/bin/python -m lo_arm.sample --help
+venv/bin/python -m src.models.lo_arm.train --help
+venv/bin/python -m src.models.lo_arm.generate --help
 ```
 
 For cluster training, `submit.sub` mirrors the distributed SLURM style used by

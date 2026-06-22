@@ -9,7 +9,8 @@ from torch.optim import AdamW
 from tqdm import tqdm
 from dotenv import load_dotenv
 
-from models import MRNACsvDataset, MRNATransformer
+from ..common import MRNACsvDataset, save_checkpoint
+from .models import MRNATransformer
 
 def compute_validation_loss(args, model, valid_dataloader, global_step, device):
     model.eval()
@@ -64,12 +65,13 @@ def train(args, device, only_utr5=False):
     dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     valid_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
 
+    model_max_len = max(train_dataset.max_len, val_dataset.max_len)
     model = MRNATransformer(
         vocab_size=train_dataset.vocab_size,
         d_model=args.d_model,
         nhead=args.n_heads,
         num_layers=args.n_layers,
-        max_len=max(train_dataset.max_len, val_dataset.max_len),
+        max_len=model_max_len,
     ).to(device)
 
     global_step = 0
@@ -115,8 +117,34 @@ def train(args, device, only_utr5=False):
         valid_loss = compute_validation_loss(args, model, valid_dataloader, global_step, device)
 
         if args.output_path and valid_loss < best_loss:
-            best_loss = valid_loss 
-            torch.save({"model_state_dict": model.state_dict()}, args.output_path)
+            best_loss = valid_loss
+            save_checkpoint(
+                args.output_path,
+                model_type="transformer",
+                model_config={
+                    "vocab_size": train_dataset.vocab_size,
+                    "d_model": args.d_model,
+                    "n_heads": args.n_heads,
+                    "num_layers": args.n_layers,
+                    "max_len": model_max_len,
+                },
+                model_state_dict=model.state_dict(),
+                tokenizer_config={
+                    "k": train_dataset.tokenizer.k,
+                    "only_utr5": train_dataset.tokenizer.only_utr5,
+                    "include_u_alias": train_dataset.tokenizer.include_u_alias,
+                },
+                data_config={
+                    "max_utr5_len": args.max_utr5_len,
+                    "max_cds_len": args.max_cds_len,
+                    "max_utr3_len": args.max_utr3_len,
+                },
+                training={
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "best_val_loss": best_loss,
+                },
+            )
 
 def main():
     parser = argparse.ArgumentParser()

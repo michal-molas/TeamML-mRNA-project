@@ -1,20 +1,14 @@
-from pathlib import Path
-import sys
-from types import SimpleNamespace
-
 import pandas as pd
 import torch
 from tqdm import tqdm
 
-from scorers.base import Scorer
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "transformer_training"))
-from finetune import (
+from .base import Scorer
+from src.models.common import (
     RIBONN_CONFIG,
     RIBONN_MAX_TX_LEN,
     RIBONN_MAX_UTR5_LEN,
+    RiboNNEnsemble,
     load_ribonn,
-    ribonn_predict_using_nested_cross_validation_models,
 )
 
 
@@ -111,6 +105,24 @@ class RiboNNScorer(Scorer):
 
         self._model = None
 
+    def _get_model(self):
+        if self._model is not None:
+            return self._model
+
+        if self.weights_path is None:
+            self._model = RiboNNEnsemble(
+                self.weights_folder,
+                device=self.device,
+                top_k=self.top_k_models_to_use,
+            )
+        else:
+            print(
+                f"Loading RiboNN model from {self.weights_path} "
+                f"on device {self.device}..."
+            )
+            self._model = load_ribonn(self.weights_path, self.device)
+        return self._model
+
     def _predict_sequences(self, samples: pd.DataFrame, progress_bar: bool = False) -> torch.Tensor:
         if samples.empty:
             return torch.empty(0, RIBONN_CONFIG["num_targets"])
@@ -130,33 +142,23 @@ class RiboNNScorer(Scorer):
         )
 
         ribonn_input = ribonn_input.to(self.device)
-        if self.weights_path is None:
-            args = SimpleNamespace(
-                ribonn_weights_folder=self.weights_folder,
-                top_k_models_to_use=self.top_k_models_to_use,
-            )
-            with torch.no_grad():
-                return ribonn_predict_using_nested_cross_validation_models(
-                    args=args,
-                    device=self.device,
-                    ribonn_input=ribonn_input,
-                    batch_width=len(samples),
-                ).cpu()
-
         all_predictions = torch.zeros(
             (len(samples), RIBONN_CONFIG["num_targets"]),
             dtype=torch.float32,
             device=self.device,
         )
-        print(f"Loading RiboNN model from {self.weights_path} on device {self.device}...")
-        model, _ = load_ribonn(self.weights_path, self.device)
+        model = self._get_model()
         with torch.no_grad():
             iterator = range(0, len(samples), self.batch_size)
             if progress_bar:
-                iterator = tqdm(iterator, total=(len(samples) + self.batch_size - 1) // self.batch_size, desc="Predicting with RiboNN")
+                iterator = tqdm(
+                    iterator,
+                    total=(len(samples) + self.batch_size - 1) // self.batch_size,
+                    desc="Predicting with RiboNN",
+                )
             for start in iterator:
                 end = min(start + self.batch_size, len(samples))
-                all_predictions[start:end] += model(ribonn_input[start:end])
+                all_predictions[start:end] = model(ribonn_input[start:end])
 
         return all_predictions.cpu()
 

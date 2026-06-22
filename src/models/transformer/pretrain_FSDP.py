@@ -23,7 +23,8 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
-from models import MRNACsvDataset, MRNATransformer
+from ..common import MRNACsvDataset, save_checkpoint
+from .models import MRNATransformer
 
 
 def is_dist():
@@ -137,7 +138,15 @@ def compute_validation_loss(args, model, valid_dataloader, global_step, device):
     return global_val_loss.item()
 
 
-def save_fsdp_checkpoint(model, output_path):
+def save_fsdp_checkpoint(
+    model,
+    output_path,
+    *,
+    model_config,
+    tokenizer_config,
+    data_config,
+    training,
+):
     """
     Save a full, non-sharded state_dict on rank 0 only.
     """
@@ -151,7 +160,15 @@ def save_fsdp_checkpoint(model, output_path):
         cpu_state = model.state_dict()
 
     if is_main_process():
-        torch.save({"model_state_dict": cpu_state}, output_path)
+        save_checkpoint(
+            output_path,
+            model_type="transformer",
+            model_config=model_config,
+            model_state_dict=cpu_state,
+            tokenizer_config=tokenizer_config,
+            data_config=data_config,
+            training=training,
+        )
 
 
 def train(args, device, only_utr5=False):
@@ -204,12 +221,13 @@ def train(args, device, only_utr5=False):
         pin_memory=True,
     )
 
+    model_max_len = max(train_dataset.max_len, val_dataset.max_len)
     base_model = MRNATransformer(
         vocab_size=train_dataset.vocab_size,
         d_model=args.d_model,
         nhead=args.n_heads,
         num_layers=args.n_layers,
-        max_len=max(train_dataset.max_len, val_dataset.max_len),
+        max_len=model_max_len,
     )
 
     auto_wrap_policy = functools.partial(
@@ -292,7 +310,32 @@ def train(args, device, only_utr5=False):
 
         if args.output_path and valid_loss < best_loss:
             best_loss = valid_loss
-            save_fsdp_checkpoint(model, args.output_path)
+            save_fsdp_checkpoint(
+                model,
+                args.output_path,
+                model_config={
+                    "vocab_size": train_dataset.vocab_size,
+                    "d_model": args.d_model,
+                    "n_heads": args.n_heads,
+                    "num_layers": args.n_layers,
+                    "max_len": model_max_len,
+                },
+                tokenizer_config={
+                    "k": train_dataset.tokenizer.k,
+                    "only_utr5": train_dataset.tokenizer.only_utr5,
+                    "include_u_alias": train_dataset.tokenizer.include_u_alias,
+                },
+                data_config={
+                    "max_utr5_len": args.max_utr5_len,
+                    "max_cds_len": args.max_cds_len,
+                    "max_utr3_len": args.max_utr3_len,
+                },
+                training={
+                    "epoch": epoch,
+                    "global_step": global_step,
+                    "best_val_loss": best_loss,
+                },
+            )
 
 
 def main():

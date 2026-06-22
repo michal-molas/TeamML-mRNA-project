@@ -11,9 +11,10 @@
 # To get number of cpu per task
 export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
 
-# activate env
-source ../../venv_setup/activate.sh
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT/src/models/indigo"
+source "$REPO_ROOT/venv_setup/activate.sh"
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
-# run script 
-# time srun python3 pretrain.py --wandb --gen_order l2r
-time srun python3 pretrain.py --wandb --gen_order sao --sao_beam_size 4 --sao_tokens_per_step 10
+# time srun python3 -m src.models.indigo.pretrain --wandb --gen_order l2r
+time srun python3 -m src.models.indigo.pretrain --wandb --gen_order sao --sao_beam_size 4 --sao_tokens_per_step 10

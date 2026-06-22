@@ -1,7 +1,7 @@
 import RNA
 import pandas as pd
 
-from scorers.base import Scorer
+from .base import Scorer
 
 
 class RNAfoldScorer(Scorer):

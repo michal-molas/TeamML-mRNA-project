@@ -1,6 +1,6 @@
 import pandas as pd
 
-from scorers.base import Scorer
+from .base import Scorer
 
 
 class StringStatisticsScorer(Scorer):

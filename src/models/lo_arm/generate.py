@@ -6,9 +6,10 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
-from data import MRNALoArmDataset, build_model_inputs
-from loss import mask_value_logits
-from model import LoArmConfig, LoArmTransformer
+from ..common import load_checkpoint
+from .data import MRNALoArmDataset, build_model_inputs
+from .loss import mask_value_logits
+from .model import LoArmConfig, LoArmTransformer
 
 
 def _sample_from_logits(logits, temperature=1.0, greedy=False):
@@ -81,11 +82,14 @@ def sample_from_cds(
 
 
 def _load_checkpoint(path, device):
-    checkpoint = torch.load(path, map_location=device)
-    config = LoArmConfig(**checkpoint["config"])
+    checkpoint = load_checkpoint(
+        path,
+        map_location=device,
+        expected_model_type="lo_arm",
+    )
+    config = LoArmConfig(**checkpoint.model_config)
     model = LoArmTransformer(config).to(device)
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    model.load_state_dict(state_dict)
+    model.load_state_dict(checkpoint.model_state_dict, strict=True)
     model.eval()
     return model, checkpoint
 
@@ -97,23 +101,42 @@ def main():
     parser.add_argument("--output_csv", required=True)
     parser.add_argument("--samples_per_cds", type=int, default=1)
     parser.add_argument("--max_samples", type=int, default=None)
-    parser.add_argument("--max_utr5_len", type=int, default=200)
-    parser.add_argument("--max_cds_len", type=int, default=500)
-    parser.add_argument("--max_utr3_len", type=int, default=200)
-    parser.add_argument("--k", type=int, default=3)
+    parser.add_argument("--max_utr5_len", type=int, default=None)
+    parser.add_argument("--max_cds_len", type=int, default=None)
+    parser.add_argument("--max_utr3_len", type=int, default=None)
+    parser.add_argument("--k", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--greedy_order", action="store_true")
     parser.add_argument("--greedy_value", action="store_true")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, _ = _load_checkpoint(args.model_path, device)
+    model, checkpoint = _load_checkpoint(args.model_path, device)
+    data_config = checkpoint.data_config
+    tokenizer_config = checkpoint.tokenizer_config
+    max_utr5_len = (
+        args.max_utr5_len
+        if args.max_utr5_len is not None
+        else data_config.get("max_utr5_len", 200)
+    )
+    max_cds_len = (
+        args.max_cds_len
+        if args.max_cds_len is not None
+        else data_config.get("max_cds_len", 500)
+    )
+    max_utr3_len = (
+        args.max_utr3_len
+        if args.max_utr3_len is not None
+        else data_config.get("max_utr3_len", 200)
+    )
+    k = args.k if args.k is not None else tokenizer_config.get("k", 3)
     dataset = MRNALoArmDataset(
         args.dataset_csv,
-        max_utr5_len=args.max_utr5_len,
-        max_cds_len=args.max_cds_len,
-        max_utr3_len=args.max_utr3_len,
-        k=args.k,
+        max_utr5_len=max_utr5_len,
+        max_cds_len=max_cds_len,
+        max_utr3_len=max_utr3_len,
+        only_utr5=tokenizer_config.get("only_utr5", False),
+        k=k,
     )
 
     rows = []
