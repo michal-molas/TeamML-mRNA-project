@@ -10,9 +10,12 @@
 
 export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
 
-source ../../venv_setup/activate.sh
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT/src/models/lo_arm"
+source "$REPO_ROOT/venv_setup/activate.sh"
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
-time srun python3 train.py \
+time srun python3 -m src.models.lo_arm.train \
     --train_csv_path ../../data/pretraining/dataset_with_utr3/train.csv \
     --test_csv_path ../../data/pretraining/dataset_with_utr3/test.csv \
     --output_path ../../data/models/lo_arm_pretrained.pt \

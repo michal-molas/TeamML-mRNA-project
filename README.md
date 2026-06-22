@@ -26,7 +26,7 @@ Pretraining dataset is available under `data/pretraining/pretraining_refseq.csv`
 This csv file has columns `id`, `utr5`, `cds`, `utr3`. Example usage below:
 
 ```
-from src.transformer_training.pretrain import MRNACsvDataset
+from src.models.common import MRNACsvDataset
 
 data_path = "data/pretraining/pretraining_refseq.csv"
 dataset = MRNACsvDataset(data_path)

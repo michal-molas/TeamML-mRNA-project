@@ -1,9 +1,9 @@
 """
 Usage:
 
-    python generate_samples.py transformer CHECKPOINT.pt input.csv output.csv
-    python generate_samples.py indigo CHECKPOINT.pt input.csv output.csv
-    python generate_samples.py loarm CHECKPOINT.pt input.csv output.csv
+    python -m src.eval.generate_samples transformer CHECKPOINT.pt input.csv output.csv
+    python -m src.eval.generate_samples indigo CHECKPOINT.pt input.csv output.csv
+    python -m src.eval.generate_samples loarm CHECKPOINT.pt input.csv output.csv
 
 The input CSV must contain id, utr5, cds, and utr3 columns.
 The output CSV contains id, sample, utr5, cds, and utr3 columns.

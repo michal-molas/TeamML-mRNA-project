@@ -11,13 +11,12 @@
 # To get number of cpu per task
 export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
 
-export WANDB_API_KEY="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"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT/src/models/indigo"
+source "$REPO_ROOT/venv_setup/activate.sh"
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
-# activate env
-source ../../venv_setup/activate.sh
-
-# run script 
-time srun python3 finetune.py \
+time srun python3 -m src.models.indigo.finetune \
     --csv_path ../../data/finetuning/ribonn/dataset.csv \
     --ribonn_weights_folder ../../data/ribonn_weights/weights/human \
     --lambda_ribonn 0.05 \
@@ -26,4 +25,3 @@ time srun python3 finetune.py \
     --batch_size 4 \
     --epochs 10 \
     --output_path checkpoints/test_model.pth
-

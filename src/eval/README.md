@@ -13,7 +13,7 @@ id,utr5,cds,utr3
 Generate an eval-ready CSV:
 
 ```bash
-python src/eval/generate_samples.py transformer CHECKPOINT.pt input.csv data/generated/samples.csv \
+python -m src.eval.generate_samples transformer CHECKPOINT.pt input.csv data/generated/samples.csv \
   --samples_per_cds 5 \
   --max_samples 100
 ```
@@ -40,7 +40,7 @@ cd src/eval
 Before submitting, edit the generation command in `submit.sub`, for example:
 
 ```bash
-srun python3 generate_samples.py \
+srun python3 -m src.eval.generate_samples \
   transformer \
   ../../data/models/utr53_pretrained.pt \
   ../../data/pretraining/small_test.csv \
@@ -68,7 +68,7 @@ scorers:
 Run scoring:
 
 ```bash
-python src/eval/score_sequences.py --config src/eval/configs/ribonn.yml
+python -m src.eval.score_sequences --config src/eval/configs/ribonn.yml
 ```
 
 This writes:
@@ -85,7 +85,7 @@ To run scoring and aggregation with it:
 
 ```bash
 cd src/eval
-python run_eval.py --config configs/default.yml
+python -m src.eval.run_eval --config src/eval/configs/default.yml
 ```
 
 This writes results to the `eval_dir` set in `configs/default.yml`.
@@ -95,7 +95,7 @@ This writes results to the `eval_dir` set in `configs/default.yml`.
 Run:
 
 ```bash
-python src/eval/calculate_statistics.py \
+python -m src.eval.calculate_statistics \
   --config src/eval/configs/ribonn.yml \
   --scores_csv data/evals/my_eval/scores.csv \
   --output_dir data/evals/my_eval

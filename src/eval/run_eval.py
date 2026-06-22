@@ -28,31 +28,36 @@ def main() -> None:
     parser = _get_parser()
     args = parser.parse_args()
 
-    config_path = args.config
+    config_path = Path(args.config).resolve()
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     print(f"Loaded config path: {config_path}")
 
     # If eval dir is specified in config, use it. Otherwise, create a new one with timestamp.
     eval_dir = _get_eval_dir(config)
+    eval_dir = eval_dir.resolve()
+    repo_root = Path(__file__).resolve().parents[2]
 
     print("Running score_sequences.py...")
     subprocess.run(
         [
             sys.executable,
-            "score_sequences.py",
+            "-m",
+            "src.eval.score_sequences",
             "--config",
             str(config_path),
             "--eval_dir",
             str(eval_dir),
         ],
+        cwd=repo_root,
         check=True,
     )
 
     subprocess.run(
         [
             sys.executable,
-            "calculate_statistics.py",
+            "-m",
+            "src.eval.calculate_statistics",
             "--config",
             str(config_path),
             "--scores_csv",
@@ -60,6 +65,7 @@ def main() -> None:
             "--output_dir",
             str(eval_dir),
         ],
+        cwd=repo_root,
         check=True,
     )
 

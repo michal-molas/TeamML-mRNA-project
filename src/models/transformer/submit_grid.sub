@@ -11,8 +11,10 @@
 # To get number of cpu per task
 export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
 
-# activate env
-source ../../venv_setup/activate.sh
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT/src/models/transformer"
+source "$REPO_ROOT/venv_setup/activate.sh"
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 nlambdas=(0.5 1.0 2.0 4.0)
 lrs=(5e-5 1e-4 3e-4)
@@ -25,8 +27,7 @@ LAMBDA=${nlambdas[$lambda_idx]}
 
 echo "Running with LR=$LR, LAMBDA=$LAMBDA"
 
-# run script 
-time srun python3 finetune.py \
+time srun python3 -m src.models.transformer.finetune \
     --lambda_ribonn $LAMBDA \
     --learning_rate $LR \
     --epochs 30 \
