@@ -60,7 +60,7 @@ def run_command(cmd: list[str]) -> int:
     print("STDOUT:")
     print(proc.stdout)
 
-    print("STDERR:")
+    # print("STDERR:")
     print(proc.stderr)
 
     return proc.returncode

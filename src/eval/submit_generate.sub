@@ -1,0 +1,33 @@
+#!/bin/bash -x
+#SBATCH --account=hai_1223
+#SBATCH --cpus-per-task=48
+#SBATCH --gres=gpu:1
+#SBATCH --output=out/generate.%j.out
+#SBATCH --error=err/generate.%j.err
+#SBATCH --time=02:00:00
+#SBATCH --partition=booster
+
+export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
+
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
+source "$REPO_ROOT/../venv_setup/activate.sh"
+cd "$REPO_ROOT"
+
+# Edit these values before submitting the job.
+EVAL_NAME="my_eval"
+MODEL_NAME="transformer_pretrained"
+MODEL_TYPE="transformer"
+CHECKPOINT_PATH="data/models/utr53_pretrained.pt"
+INPUT_PATH="data/pretraining/small_test.csv"
+SAMPLES_PER_CDS=3
+MAX_SAMPLES=20
+
+MODEL_DIR="data/evals/$EVAL_NAME/$MODEL_NAME"
+
+srun python3 src/eval/generate_samples.py \
+    "$MODEL_TYPE" \
+    "$CHECKPOINT_PATH" \
+    "$INPUT_PATH" \
+    "$MODEL_DIR/sequences.csv" \
+    --samples_per_cds "$SAMPLES_PER_CDS" \
+    --max_samples "$MAX_SAMPLES"

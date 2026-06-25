@@ -35,11 +35,20 @@ from src.lo_arm.generate import _load_checkpoint as _load_loarm_checkpoint
 from src.lo_arm.generate import sample_from_cds as loarm_sample_from_cds
 from src.transformer_training.generate import MRNAInferenceSampler
 from src.transformer_training.models import MRNA_VOCAB, MRNACsvDataset, MRNATransformer
-from src.transformer_training.utils import load_pretrained_weights
 
 
 INPUT_COLS = ["id", "utr5", "cds", "utr3"]
 OUTPUT_COLS = ["id", "sample", "utr5", "cds", "utr3"]
+
+
+def load_pretrained_weights(model, checkpoint_path, device):
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
+    missing, unexpected = model.load_state_dict(state_dict, strict=True)
+    print(
+        f"Loaded {checkpoint_path}  missing={len(missing)}  unexpected={len(unexpected)}"
+    )
 
 
 def _device() -> torch.device:
