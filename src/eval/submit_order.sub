@@ -1,0 +1,27 @@
+#!/bin/bash -x
+#SBATCH --account=hai_1223
+#SBATCH --cpus-per-task=48
+#SBATCH --gres=gpu:1
+#SBATCH --output=out/output.%j
+#SBATCH --error=err/error.%j
+#SBATCH --time=00:30:00
+#SBATCH --partition=booster
+
+export SRUN_CPUS_PER_TASK="$SLURM_CPUS_PER_TASK"
+
+source ../../venv_setup/activate.sh
+
+# Add the repository root directory to Python's search path
+export PYTHONPATH="${PYTHONPATH}:../../"
+
+INDIGO_CHECKPOINT="../../data/models/indigo_pretrain.pt"
+LOARM_CHECKPOINT="../../data/models/lo_arm_pretrained.pt"
+
+INPUT_CSV="../../data/pretraining/dataset_with_utr3/test.csv"
+OUTPUT_JSON="../../data/generated/generation_orders.json"
+
+srun python3 record_order.py \
+    --checkpoint_path "$INDIGO_CHECKPOINT" \
+    --input_csv "$INPUT_CSV" \
+    --output_json "$OUTPUT_JSON" \
+    --samples 1000
