@@ -41,7 +41,7 @@ except ImportError as exc:  # pragma: no cover - environment dependent
 SEQUENCE_COLUMNS = ("utr5", "cds", "utr3")
 SEQUENCES_REQUIRED_COLUMNS = {"id", "sample", *SEQUENCE_COLUMNS}
 SCORES_REQUIRED_COLUMNS = {"id", "sample"}
-TE_COLUMN_CANDIDATES = ("ribonn_te", "predicted_te", "te")
+TE_COLUMN_CANDIDATES = ("ribonn_te", "predicted_te", "te", "utrlm_te")
 COHORT_GT = "Ground truth"
 COHORT_GENERATED = "Generated"
 DIVERSITY_KMER_SIZE = 3
@@ -50,6 +50,20 @@ COHORT_COLORS = {
     COHORT_GT: "#2563eb",
     COHORT_GENERATED: "#16a34a",
 }
+VIOLIN_CATEGORY_COLORS = (
+    "#475569",
+    "#f97316",
+    "#0891b2",
+    "#db2777",
+    "#7c3aed",
+    "#65a30d",
+    "#ca8a04",
+    "#dc2626",
+    "#4f46e5",
+    "#0d9488",
+    "#9333ea",
+    "#ea580c",
+)
 DIVERSITY_COLORS = {
     "Generated vs generated": "#0f766e",
     "Generated vs ground truth": "#be123c",
@@ -63,15 +77,24 @@ class MetricSpec:
     integer_bins: bool = False
 
 
-METRICS = (
+SEQUENCE_METRICS = (
     MetricSpec("utr5_length", "5' UTR length (nt)", integer_bins=True),
     MetricSpec("cds_length", "CDS length (nt)", integer_bins=True),
     MetricSpec("utr3_length", "3' UTR length (nt)", integer_bins=True),
     MetricSpec("utr5_gc_content", "5' UTR GC content"),
     MetricSpec("cds_gc_content", "CDS GC content"),
     MetricSpec("utr3_gc_content", "3' UTR GC content"),
-    MetricSpec("ribonn_te", "Predicted TE"),
 )
+SCORE_METRICS = (
+    MetricSpec("ribonn_te", "Predicted TE"),
+    MetricSpec("utrlm_mrl", "UTRLM MRL"),
+    MetricSpec("utrlm_te", "UTRLM TE"),
+    MetricSpec("utrlm_el", "UTRLM EL"),
+    MetricSpec("rnafold_mfe", "RNAfold MFE"),
+    MetricSpec("rnafold_mfe_per_nt", "RNAfold MFE per nt"),
+)
+METRICS = (*SEQUENCE_METRICS, *SCORE_METRICS)
+SCORE_METRIC_NAMES = tuple(metric.name for metric in SCORE_METRICS)
 UTR_LENGTH_METRICS = (
     MetricSpec("utr5_length", "UTR5 length (nt)", integer_bins=True),
     MetricSpec("utr3_length", "UTR3 length (nt)", integer_bins=True),
@@ -139,7 +162,7 @@ def load_eval_metrics(eval_dir: Path, progress: ProgressCallback | None = None) 
         _emit(progress, f"Loaded model {model_idx}/{len(model_dirs)}: {model_dir.name}")
 
     metrics = pd.concat(records, ignore_index=True)
-    metric_columns = [metric.name for metric in METRICS]
+    metric_columns = [metric.name for metric in METRICS if metric.name in metrics.columns]
     metrics[metric_columns] = metrics[metric_columns].apply(pd.to_numeric, errors="coerce")
     return metrics
 
@@ -255,13 +278,13 @@ def _load_model_metrics(model_dir: Path) -> pd.DataFrame:
         sequence_metrics[f"{column}_length"] = cleaned.map(len)
         sequence_metrics[f"{column}_gc_content"] = cleaned.map(_gc_content)
 
-    te_scores = scores[["id", "sample", te_column]].copy()
-    te_scores["_id_key"] = te_scores["id"].map(_key)
-    te_scores["_sample_key"] = te_scores["sample"].map(_key)
-    te_scores = te_scores.rename(columns={te_column: "ribonn_te"})
+    score_metrics = _extract_score_metrics(scores, te_column)
+    score_metric_names = [name for name in SCORE_METRIC_NAMES if name in score_metrics.columns]
+    score_metrics["_id_key"] = score_metrics["id"].map(_key)
+    score_metrics["_sample_key"] = score_metrics["sample"].map(_key)
 
     merged = sequence_metrics.merge(
-        te_scores[["_id_key", "_sample_key", "ribonn_te"]],
+        score_metrics[["_id_key", "_sample_key", *score_metric_names]],
         on=["_id_key", "_sample_key"],
         how="left",
         validate="one_to_one",
@@ -272,21 +295,25 @@ def _load_model_metrics(model_dir: Path) -> pd.DataFrame:
         COHORT_GT,
         COHORT_GENERATED,
     )
-    return merged[
-        [
-            "model",
-            "id",
-            "sample",
-            "cohort",
-            "utr5_length",
-            "cds_length",
-            "utr3_length",
-            "utr5_gc_content",
-            "cds_gc_content",
-            "utr3_gc_content",
-            "ribonn_te",
-        ]
+    output_columns = [
+        "model",
+        "id",
+        "sample",
+        "cohort",
+        *[metric.name for metric in SEQUENCE_METRICS],
+        *score_metric_names,
     ]
+    return merged[output_columns]
+
+
+def _extract_score_metrics(scores: pd.DataFrame, te_column: str) -> pd.DataFrame:
+    score_metrics = scores[["id", "sample"]].copy()
+    for score_name in SCORE_METRIC_NAMES:
+        if score_name in scores.columns:
+            score_metrics[score_name] = scores[score_name]
+    if "ribonn_te" not in score_metrics.columns:
+        score_metrics["ribonn_te"] = scores[te_column]
+    return score_metrics
 
 
 def _calculate_model_sequence_diversity(
@@ -470,7 +497,7 @@ def _gc_content(sequence: str) -> float:
 
 
 def _save_summary(metrics: pd.DataFrame, output_dir: Path) -> None:
-    metric_columns = [metric.name for metric in METRICS]
+    metric_columns = [metric.name for metric in _available_metric_specs(metrics)]
     summary = (
         metrics.groupby(["model", "cohort"], dropna=False)[metric_columns]
         .agg(["count", "mean", "median", "min", "max"])
@@ -499,6 +526,46 @@ def _save_sequence_diversity_summary(diversity: pd.DataFrame, output_dir: Path) 
     )
     summary.columns = [f"{metric}_{stat}" for metric, stat in summary.columns]
     summary.reset_index().to_csv(output_dir / "sequence_diversity_summary.csv", index=False)
+
+
+def _available_metric_specs(
+    df: pd.DataFrame,
+    metrics: tuple[MetricSpec, ...] = METRICS,
+) -> tuple[MetricSpec, ...]:
+    available: list[MetricSpec] = []
+    for metric in metrics:
+        if metric.name not in df.columns:
+            continue
+        values = pd.to_numeric(df[metric.name], errors="coerce")
+        if values.notna().any():
+            available.append(metric)
+    return tuple(available)
+
+
+def _available_score_metric_specs(df: pd.DataFrame) -> tuple[MetricSpec, ...]:
+    return _available_metric_specs(df, SCORE_METRICS)
+
+
+def _models_with_finite_values(
+    df: pd.DataFrame,
+    columns: str | tuple[str, ...],
+    *,
+    require_all_columns: bool = True,
+) -> list[str]:
+    column_names = (columns,) if isinstance(columns, str) else columns
+    models: list[str] = []
+    for model in sorted(df["model"].unique()):
+        subset = df[df["model"] == model]
+        has_values = [
+            not _finite_values(subset, column).empty
+            for column in column_names
+            if column in subset.columns
+        ]
+        if require_all_columns and len(has_values) == len(column_names) and all(has_values):
+            models.append(model)
+        elif not require_all_columns and any(has_values):
+            models.append(model)
+    return models
 
 
 def _plot_per_model(
@@ -551,6 +618,10 @@ def _plot_merged(
     progress: ProgressCallback | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    histogram_dir = output_dir / "histograms"
+    violin_dir = output_dir / "violins"
+    histogram_dir.mkdir(parents=True, exist_ok=True)
+    violin_dir.mkdir(parents=True, exist_ok=True)
     stale_scatter_dir = output_dir / "correlation_scatters"
     if stale_scatter_dir.exists():
         shutil.rmtree(stale_scatter_dir)
@@ -558,28 +629,48 @@ def _plot_merged(
     _plot_grouped_distribution_by_model(
         metrics,
         UTR_LENGTH_METRICS,
-        output_dir / "utr_length_distributions.png",
+        histogram_dir / "utr_length_distributions.png",
         title="UTR length distributions: generated vs ground truth",
         ylabel="UTR density",
+    )
+    _plot_grouped_violin_by_model(
+        metrics,
+        UTR_LENGTH_METRICS,
+        violin_dir / "utr_length_distributions_violin.png",
+        title="UTR length distributions: ground truth and generated models",
     )
     _emit(progress, "Merged plot: UTR lengths")
 
     _plot_grouped_distribution_by_model(
         metrics,
         UTR_GC_METRICS,
-        output_dir / "utr_gc_content_distributions.png",
+        histogram_dir / "utr_gc_content_distributions.png",
         title="UTR GC content distributions: generated vs ground truth",
         ylabel="UTR density",
     )
+    _plot_grouped_violin_by_model(
+        metrics,
+        UTR_GC_METRICS,
+        violin_dir / "utr_gc_content_distributions_violin.png",
+        title="UTR GC content distributions: ground truth and generated models",
+    )
     _emit(progress, "Merged plot: UTR GC content")
 
-    _plot_metric_distribution_grid(
-        metrics,
-        MetricSpec("ribonn_te", "Predicted TE"),
-        output_dir / "predicted_te_distributions_by_model.png",
-        title="Predicted TE distributions by model: generated vs ground truth",
-    )
-    _emit(progress, "Merged plot: predicted TE")
+    for score_metric in _available_score_metric_specs(metrics):
+        score_distribution_path = histogram_dir / _score_distribution_filename(score_metric.name)
+        _plot_metric_distribution_grid(
+            metrics,
+            score_metric,
+            score_distribution_path,
+            title=f"{score_metric.label} distributions by model: generated vs ground truth",
+        )
+        _plot_metric_violin_by_model(
+            metrics,
+            score_metric,
+            _violin_output_path(violin_dir / score_distribution_path.name),
+            title=f"{score_metric.label} distributions: ground truth and generated models",
+        )
+        _emit(progress, f"Merged plot: {score_metric.label}")
 
     _plot_correlation_heatmap(
         metrics,
@@ -648,14 +739,15 @@ def _plot_distribution_grid(
     title: str,
     split_by_model: bool,
 ) -> None:
+    metric_specs = _available_metric_specs(df)
     models = sorted(df["model"].unique()) if split_by_model else [None]
-    nrows = len(METRICS)
+    nrows = len(metric_specs)
     ncols = len(models)
     fig_width = max(5.0 * ncols, 8.0)
     fig_height = max(2.4 * nrows, 10.0)
     fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(fig_width, fig_height), squeeze=False)
 
-    for row_idx, metric in enumerate(METRICS):
+    for row_idx, metric in enumerate(metric_specs):
         values = _finite_values(df, metric.name)
         bins = _hist_bins(values, bins=40, integer_bins=metric.integer_bins)
         for col_idx, model in enumerate(models):
@@ -684,7 +776,15 @@ def _plot_grouped_distribution_by_model(
     title: str,
     ylabel: str,
 ) -> None:
-    models = sorted(df["model"].unique())
+    models = _models_with_finite_values(
+        df,
+        tuple(metric.name for metric in metrics),
+        require_all_columns=True,
+    )
+    if not models:
+        _plot_no_data(output_path, title, "No models have finite values for these metrics.")
+        return
+
     fig, axes = plt.subplots(
         nrows=len(metrics),
         ncols=len(models),
@@ -722,7 +822,11 @@ def _plot_metric_distribution_grid(
     *,
     title: str,
 ) -> None:
-    models = sorted(df["model"].unique())
+    models = _models_with_finite_values(df, metric.name)
+    if not models:
+        _plot_no_data(output_path, title, f"No models have finite values for {metric.label}.")
+        return
+
     ncols = min(MODEL_GRID_COLUMNS, len(models))
     nrows = math.ceil(len(models) / ncols)
     fig, axes = plt.subplots(
@@ -752,6 +856,173 @@ def _plot_metric_distribution_grid(
     fig.tight_layout(rect=(0, 0, 0.97, 0.93))
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
+
+
+def _plot_grouped_violin_by_model(
+    df: pd.DataFrame,
+    metrics: tuple[MetricSpec, ...],
+    output_path: Path,
+    *,
+    title: str,
+) -> None:
+    models = _models_with_finite_values(
+        df[df["cohort"] == COHORT_GENERATED],
+        tuple(metric.name for metric in metrics),
+        require_all_columns=True,
+    )
+    if not models and all(_ground_truth_values(df, metric.name).empty for metric in metrics):
+        _plot_no_data(output_path, title, "No models have finite values for these metrics.")
+        return
+
+    category_count = len(models) + int(any(not _ground_truth_values(df, metric.name).empty for metric in metrics))
+    fig, axes = plt.subplots(
+        nrows=len(metrics),
+        ncols=1,
+        figsize=(max(1.1 * category_count, 8.5), max(3.1 * len(metrics), 5.2)),
+        squeeze=False,
+    )
+
+    for row_idx, metric in enumerate(metrics):
+        ax = axes[row_idx][0]
+        _draw_model_violins(ax, df, models, metric.name)
+        ax.set_ylabel(metric.label)
+        if row_idx == len(metrics) - 1:
+            ax.set_xlabel("Model")
+        else:
+            ax.tick_params(axis="x", labelbottom=False)
+        ax.grid(axis="y", alpha=0.22)
+
+    fig.suptitle(title, fontsize=13, y=0.995)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_metric_violin_by_model(
+    df: pd.DataFrame,
+    metric: MetricSpec,
+    output_path: Path,
+    *,
+    title: str,
+) -> None:
+    models = _models_with_finite_values(df[df["cohort"] == COHORT_GENERATED], metric.name)
+    if not models and _ground_truth_values(df, metric.name).empty:
+        _plot_no_data(output_path, title, f"No models have finite values for {metric.label}.")
+        return
+
+    category_count = len(models) + int(not _ground_truth_values(df, metric.name).empty)
+    fig, ax = plt.subplots(figsize=(max(1.1 * category_count, 8.5), 5.0))
+    _draw_model_violins(ax, df, models, metric.name)
+    ax.set_xlabel("Model")
+    ax.set_ylabel(metric.label)
+    ax.set_title(title)
+    ax.grid(axis="y", alpha=0.22)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _draw_model_violins(
+    ax: plt.Axes,
+    df: pd.DataFrame,
+    models: list[str],
+    column: str,
+) -> None:
+    labels, values_by_position, colors = _violin_values_by_model(df, models, column)
+    positions = np.arange(len(values_by_position), dtype=float)
+    violin_values = []
+    violin_positions = []
+    violin_colors = []
+    for position, values, color in zip(positions, values_by_position, colors):
+        if len(values) >= 2 and len(np.unique(values)) >= 2:
+            violin_values.append(values)
+            violin_positions.append(float(position))
+            violin_colors.append(color)
+
+    if violin_values:
+        parts = ax.violinplot(
+            violin_values,
+            positions=violin_positions,
+            widths=0.58,
+            showmeans=False,
+            showextrema=False,
+            showmedians=False,
+        )
+        for body, color in zip(parts["bodies"], violin_colors):
+            body.set_facecolor(color)
+            body.set_edgecolor(color)
+            body.set_alpha(0.28)
+
+    if values_by_position:
+        ax.boxplot(
+            values_by_position,
+            positions=positions,
+            widths=0.18,
+            showfliers=False,
+            patch_artist=True,
+            boxprops={"facecolor": "white", "edgecolor": "#334155", "linewidth": 1.0},
+            medianprops={"color": "#111827", "linewidth": 1.3},
+            whiskerprops={"color": "#334155", "linewidth": 0.8},
+            capprops={"color": "#334155", "linewidth": 0.8},
+        )
+        for position, values, color in zip(positions, values_by_position, colors):
+            offsets = _deterministic_offsets(len(values), width=0.16)
+            ax.scatter(
+                np.full(len(values), position, dtype=float) + offsets,
+                values,
+                s=7,
+                color=color,
+                alpha=0.18,
+                linewidths=0,
+            )
+
+    ax.set_xlim(-0.65, max(len(labels) - 0.35, 0.35))
+    ax.set_xticks(positions, labels=labels, rotation=35, ha="right")
+
+
+def _violin_values_by_model(
+    df: pd.DataFrame,
+    models: list[str],
+    column: str,
+) -> tuple[list[str], list[np.ndarray], list[str]]:
+    labels: list[str] = []
+    values_by_position: list[np.ndarray] = []
+
+    gt_values = _ground_truth_values(df, column).to_numpy(dtype=float)
+    if len(gt_values):
+        labels.append("GT")
+        values_by_position.append(gt_values)
+
+    for model in models:
+        values = _finite_values(
+            df[(df["model"] == model) & (df["cohort"] == COHORT_GENERATED)],
+            column,
+        ).to_numpy(dtype=float)
+        if len(values) == 0:
+            continue
+        labels.append(_display_name(model))
+        values_by_position.append(values)
+
+    colors = _violin_category_colors(len(labels))
+    return labels, values_by_position, colors
+
+
+def _violin_category_colors(count: int) -> list[str]:
+    colors = list(VIOLIN_CATEGORY_COLORS[:count])
+    if count > len(colors):
+        cmap = plt.get_cmap("turbo", count - len(colors) + 2)
+        colors.extend(matplotlib.colors.to_hex(cmap(index + 1)) for index in range(count - len(colors)))
+    return colors
+
+
+def _ground_truth_values(df: pd.DataFrame, column: str) -> pd.Series:
+    gt = df[df["cohort"] == COHORT_GT]
+    if gt.empty:
+        return _finite_values(gt, column)
+    dedupe_columns = [key for key in ("id", "sample", column) if key in gt.columns]
+    if dedupe_columns:
+        gt = gt.drop_duplicates(subset=dedupe_columns)
+    return _finite_values(gt, column)
 
 
 def _draw_cohort_means(ax: plt.Axes, df: pd.DataFrame, column: str) -> None:
@@ -827,12 +1098,14 @@ def _hide_unused_axes(axes: np.ndarray, used_count: int) -> None:
 
 
 def _plot_correlation_heatmap(df: pd.DataFrame, output_path: Path, *, title: str) -> None:
-    metric_columns = [metric.name for metric in METRICS]
+    metric_specs = _available_metric_specs(df)
+    metric_columns = [metric.name for metric in metric_specs]
     corr = _safe_correlation_matrix(df, metric_columns)
 
-    fig, ax = plt.subplots(figsize=(8.5, 7.0))
+    fig_size = max(7.0, 3.0 + 0.55 * len(metric_specs))
+    fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.82))
     image = ax.imshow(corr.to_numpy(), vmin=-1.0, vmax=1.0, cmap="coolwarm")
-    labels = [_short_metric_label(metric.name) for metric in METRICS]
+    labels = [_short_metric_label(metric.name) for metric in metric_specs]
     ax.set_xticks(range(len(labels)), labels=labels, rotation=45, ha="right")
     ax.set_yticks(range(len(labels)), labels=labels)
     ax.set_title(title)
@@ -877,7 +1150,7 @@ def _plot_pairwise_scatters(
     merged: bool,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    metric_by_name = {metric.name: metric for metric in METRICS}
+    metric_by_name = {metric.name: metric for metric in _available_metric_specs(df)}
     for x_name, y_name in combinations(metric_by_name, 2):
         x_metric = metric_by_name[x_name]
         y_metric = metric_by_name[y_name]
@@ -1051,7 +1324,11 @@ def _plot_focused_scatter_by_model(
     xlabel: str,
     ylabel: str,
 ) -> None:
-    models = sorted(df["model"].unique())
+    models = _models_with_finite_values(df, (x_name, y_name), require_all_columns=True)
+    if not models:
+        _plot_no_data(output_path, title, "No models have finite values for both scatter metrics.")
+        return
+
     ncols = min(MODEL_GRID_COLUMNS, len(models))
     nrows = math.ceil(len(models) / ncols)
     fig, axes = plt.subplots(
@@ -1378,9 +1655,24 @@ def _short_metric_label(metric_name: str) -> str:
         "utr5_gc_content": "5' GC",
         "cds_gc_content": "CDS GC",
         "utr3_gc_content": "3' GC",
-        "ribonn_te": "TE",
+        "ribonn_te": "RiboNN TE",
+        "utrlm_mrl": "UTRLM MRL",
+        "utrlm_te": "UTRLM TE",
+        "utrlm_el": "UTRLM EL",
+        "rnafold_mfe": "RNAfold MFE",
+        "rnafold_mfe_per_nt": "MFE/nt",
     }
     return labels.get(metric_name, metric_name)
+
+
+def _score_distribution_filename(metric_name: str) -> str:
+    if metric_name == "ribonn_te":
+        return "predicted_te_distributions_by_model.png"
+    return f"{_slug(metric_name)}_distributions_by_model.png"
+
+
+def _violin_output_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}_violin{output_path.suffix}")
 
 
 def _display_name(value: object) -> str:
