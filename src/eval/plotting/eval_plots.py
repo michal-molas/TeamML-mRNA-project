@@ -592,11 +592,10 @@ def _plot_per_model(
         model_dir.mkdir(parents=True, exist_ok=True)
         model_metrics = metrics[metrics["model"] == model]
 
-        _plot_distribution_grid(
+        _plot_per_metric_distributions(
             model_metrics,
-            model_dir / "distributions.png",
-            title=f"{_display_name(model)}: generated vs ground truth distributions",
-            split_by_model=False,
+            model_dir / "distributions",
+            title_prefix=f"{_display_name(model)}",
         )
         _plot_correlation_heatmap(
             model_metrics,
@@ -742,38 +741,50 @@ def _plot_merged(
     _emit(progress, "Merged plot: generated to ground truth heatmap")
 
 
-def _plot_distribution_grid(
+def _plot_per_metric_distributions(
     df: pd.DataFrame,
+    output_dir: Path,
+    *,
+    title_prefix: str,
+) -> None:
+    stale_grid_path = output_dir.with_suffix(".png")
+    if stale_grid_path.exists():
+        stale_grid_path.unlink()
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for metric in _available_metric_specs(df):
+        output_path = output_dir / f"{_slug(metric.name)}.png"
+        _plot_single_metric_distribution(
+            df,
+            metric,
+            output_path,
+            title=f"{title_prefix}: {metric.label} distribution",
+        )
+
+
+def _plot_single_metric_distribution(
+    df: pd.DataFrame,
+    metric: MetricSpec,
     output_path: Path,
     *,
     title: str,
-    split_by_model: bool,
 ) -> None:
-    metric_specs = _available_metric_specs(df)
-    models = sorted(df["model"].unique()) if split_by_model else [None]
-    nrows = len(metric_specs)
-    ncols = len(models)
-    fig_width = max(5.0 * ncols, 8.0)
-    fig_height = max(2.4 * nrows, 10.0)
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(fig_width, fig_height), squeeze=False)
+    values = _finite_values(df, metric.name)
+    if values.empty:
+        _plot_no_data(output_path, title, f"No finite values were available for {metric.label}.")
+        return
 
-    for row_idx, metric in enumerate(metric_specs):
-        values = _finite_values(df, metric.name)
-        bins = _hist_bins(values, bins=40, integer_bins=metric.integer_bins)
-        for col_idx, model in enumerate(models):
-            ax = axes[row_idx][col_idx]
-            subset = df if model is None else df[df["model"] == model]
-            _draw_histograms(ax, subset, metric.name, bins)
-            if row_idx == 0 and model is not None:
-                ax.set_title(_display_name(model), fontsize=10)
-            ax.set_xlabel(metric.label)
-            ax.set_ylabel("Density")
-
-    handles, labels = axes[0][0].get_legend_handles_labels()
-    if handles:
-        fig.legend(handles, labels, loc="upper right", frameon=False)
-    fig.suptitle(title, fontsize=14, y=0.995)
-    fig.tight_layout(rect=(0, 0, 0.97, 0.975))
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    bins = _hist_bins(values, bins=40, integer_bins=metric.integer_bins)
+    _draw_histograms(ax, df, metric.name, bins)
+    _draw_cohort_means(ax, df, metric.name)
+    ax.set_xlabel(metric.label)
+    ax.set_ylabel("Density")
+    ax.set_title(title)
+    _add_shared_legend(fig, ax)
+    fig.tight_layout(rect=(0, 0, 0.98, 0.95))
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
