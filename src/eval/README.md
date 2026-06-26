@@ -80,6 +80,11 @@ This writes:
 data/evals/my_eval/transformer_pretrained/scores.csv
 ```
 
+Plotting supports optional scorer columns beyond `ribonn_te`, including UTRLM,
+RNAfold, and Saluki stability predictions. Saluki mean values may be provided as
+either `saluki_mean` or the legacy `saluki_mean_score`; plotting normalizes them
+to `saluki_mean` and also includes `saluki_uncertainty` when present.
+
 To compare another model, choose a new `MODEL` name and repeat steps 1 and 2.
 Every model directory must contain both `sequences.csv` and `scores.csv`.
 
@@ -105,7 +110,7 @@ eval_plots/
   merged/
 ```
 
-The outputs include normalized sequence and predicted-TE metrics, cohort
+The outputs include normalized sequence metrics, supported score metrics, cohort
 summaries, mean and best TE improvements over ground truth, sequence-diversity
 statistics, per-model plots, and merged model-comparison plots.
 

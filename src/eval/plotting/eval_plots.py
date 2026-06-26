@@ -92,9 +92,14 @@ SCORE_METRICS = (
     MetricSpec("utrlm_el", "UTRLM EL"),
     MetricSpec("rnafold_mfe", "RNAfold MFE"),
     MetricSpec("rnafold_mfe_per_nt", "RNAfold MFE per nt"),
+    MetricSpec("saluki_mean", "Saluki stability mean"),
+    MetricSpec("saluki_uncertainty", "Saluki uncertainty"),
 )
 METRICS = (*SEQUENCE_METRICS, *SCORE_METRICS)
 SCORE_METRIC_NAMES = tuple(metric.name for metric in SCORE_METRICS)
+SCORE_METRIC_ALIASES = {
+    "saluki_mean": ("saluki_mean_score",),
+}
 UTR_LENGTH_METRICS = (
     MetricSpec("utr5_length", "UTR5 length (nt)", integer_bins=True),
     MetricSpec("utr3_length", "UTR3 length (nt)", integer_bins=True),
@@ -311,6 +316,11 @@ def _extract_score_metrics(scores: pd.DataFrame, te_column: str) -> pd.DataFrame
     for score_name in SCORE_METRIC_NAMES:
         if score_name in scores.columns:
             score_metrics[score_name] = scores[score_name]
+            continue
+        for alias in SCORE_METRIC_ALIASES.get(score_name, ()):
+            if alias in scores.columns:
+                score_metrics[score_name] = scores[alias]
+                break
     if "ribonn_te" not in score_metrics.columns:
         score_metrics["ribonn_te"] = scores[te_column]
     return score_metrics
@@ -1661,6 +1671,8 @@ def _short_metric_label(metric_name: str) -> str:
         "utrlm_el": "UTRLM EL",
         "rnafold_mfe": "RNAfold MFE",
         "rnafold_mfe_per_nt": "MFE/nt",
+        "saluki_mean": "Saluki mean",
+        "saluki_uncertainty": "Saluki uncertainty",
     }
     return labels.get(metric_name, metric_name)
 
