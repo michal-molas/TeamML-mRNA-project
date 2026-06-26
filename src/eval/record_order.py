@@ -39,6 +39,7 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--sample_order", action="store_true", help="Sample order logits instead of using argmax.")
     parser.add_argument("--sample_values", action="store_true", help="Sample value logits instead of using argmax.")
+    parser.add_argument("--order_top_p", type=float, default=1.0, help="Top-p cutoff for sampled LO-ARM order logits.")
     parser.add_argument("--k", type=int, default=None)
     parser.add_argument("--max_utr5_len", type=int, default=None)
     parser.add_argument("--max_cds_len", type=int, default=None)
@@ -60,13 +61,16 @@ def coalesce(*values):
 
 
 def checkpoint_state_dict(checkpoint):
-    state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    if isinstance(checkpoint, dict):
+        state_dict = checkpoint.get("model_state_dict", checkpoint.get("state_dict", checkpoint))
+    else:
+        state_dict = checkpoint
     return {key.replace("module.", "", 1): value for key, value in state_dict.items()}
 
 
 def detect_model_type(checkpoint):
     if isinstance(checkpoint, dict):
-        config = checkpoint.get("config")
+        config = checkpoint.get("config", checkpoint.get("model_config"))
         if isinstance(config, dict) and {"prefix_len", "target_len"}.issubset(config):
             return "loarm"
         state_dict = checkpoint_state_dict(checkpoint)
@@ -116,9 +120,10 @@ def load_indigo_checkpoint(checkpoint, device):
 
 
 def load_loarm_checkpoint(checkpoint, device):
-    if not isinstance(checkpoint, dict) or "config" not in checkpoint:
+    config_payload = checkpoint.get("config", checkpoint.get("model_config")) if isinstance(checkpoint, dict) else None
+    if config_payload is None:
         raise ValueError("LO-ARM order recording requires a checkpoint with a saved config payload.")
-    config = LoArmConfig(**checkpoint["config"])
+    config = LoArmConfig(**config_payload)
     state_dict = checkpoint_state_dict(checkpoint)
     model = LoArmTransformer(config).to(device)
     model.load_state_dict(state_dict)
@@ -137,13 +142,18 @@ def indigo_dataset_kwargs(args):
 
 
 def loarm_dataset_kwargs(args, checkpoint):
-    data_cfg = checkpoint.get("data", {}) if isinstance(checkpoint, dict) else {}
-    tokenizer_cfg = checkpoint.get("tokenizer", {}) if isinstance(checkpoint, dict) else {}
+    if isinstance(checkpoint, dict):
+        data_cfg = checkpoint.get("data", checkpoint.get("data_config", {}))
+        tokenizer_cfg = checkpoint.get("tokenizer", checkpoint.get("tokenizer_config", {}))
+    else:
+        data_cfg = {}
+        tokenizer_cfg = {}
     return {
         "max_utr5_len": coalesce(args.max_utr5_len, data_cfg.get("max_utr5_len"), 200),
         "max_cds_len": coalesce(args.max_cds_len, data_cfg.get("max_cds_len"), 500),
         "max_utr3_len": coalesce(args.max_utr3_len, data_cfg.get("max_utr3_len"), 200),
         "k": coalesce(args.k, tokenizer_cfg.get("k"), 3),
+        "only_utr5": bool(coalesce(tokenizer_cfg.get("only_utr5"), data_cfg.get("only_utr5"), False)),
     }
 
 def build_indigo_R(prefix_len, generated_count, ordered_steps, device):
@@ -154,10 +164,23 @@ def build_indigo_R(prefix_len, generated_count, ordered_steps, device):
         abs_pos[prefix_len + step] = prefix_len + rank_by_step[step]
     return torch.sign(abs_pos.unsqueeze(0) - abs_pos.unsqueeze(1)).long()
 
-def sample_logits(logits, temperature=1.0, greedy=True):
+def sample_logits(logits, temperature=1.0, greedy=True, top_p=1.0):
     if greedy:
         return torch.argmax(logits, dim=-1)
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    if not 0 < top_p <= 1:
+        raise ValueError("top_p must be in (0, 1]")
     probs = F.softmax(logits / temperature, dim=-1)
+    if top_p < 1.0:
+        sorted_probs, sorted_indices = torch.sort(probs, dim=-1, descending=True)
+        cumulative = torch.cumsum(sorted_probs, dim=-1)
+        keep = cumulative - sorted_probs < top_p
+        keep[..., 0] = True
+        sorted_probs = sorted_probs.masked_fill(~keep, 0.0)
+        sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        sorted_sample = torch.multinomial(sorted_probs, num_samples=1)
+        return sorted_indices.gather(1, sorted_sample).squeeze(-1)
     return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
 
@@ -239,9 +262,13 @@ def track_indigo_generation_order(
     return invert_position_to_step_order(ordered_steps)
 
 
-def mask_loarm_value_logits(value_logits, mask_id):
+def mask_loarm_value_logits(value_logits, mask_id, invalid_value_ids=None):
     logits = value_logits.clone()
-    logits[..., mask_id] = float("-inf")
+    invalid_ids = {int(mask_id)}
+    if invalid_value_ids is not None:
+        invalid_ids.update(int(token_id) for token_id in invalid_value_ids)
+    for token_id in invalid_ids:
+        logits[..., token_id] = float("-inf")
     return logits
 
 
@@ -252,14 +279,22 @@ def effective_target_length(target_ids, eos_id):
         return len(target_ids)
 
 
+def int_layout(layout):
+    return {
+        key: int(value.item() if torch.is_tensor(value) else value)
+        for key, value in layout.items()
+    }
+
+
 def track_loarm_generation_order(
     model,
     dataset,
-    cds,
+    sample,
     device,
     temperature,
     greedy_order,
     greedy_value,
+    order_top_p,
 ):
     if dataset.prefix_len != model.config.prefix_len or dataset.target_len != model.config.target_len:
         raise ValueError(
@@ -268,33 +303,88 @@ def track_loarm_generation_order(
             f"checkpoint prefix/target=({model.config.prefix_len}, {model.config.target_len})."
         )
 
-    prefix_ids, prefix_padding_mask = dataset.encode_cds_prefix(cds)
-    prefix_ids = torch.tensor(prefix_ids, dtype=torch.long, device=device).unsqueeze(0)
-    prefix_padding_mask = torch.tensor(prefix_padding_mask, dtype=torch.bool, device=device).unsqueeze(0)
+    prefix_ids = sample["prefix_ids"].to(device).unsqueeze(0)
+    prefix_padding_mask = sample["prefix_padding_mask"].to(device).unsqueeze(0)
+    prefix_region_ids = sample.get("prefix_region_ids")
+    if prefix_region_ids is not None:
+        prefix_region_ids = prefix_region_ids.to(device).unsqueeze(0)
 
-    target = torch.full((1, dataset.target_len), dataset.mask_id, dtype=torch.long, device=device)
-    remaining = torch.ones((1, dataset.target_len), dtype=torch.bool, device=device)
+    target_order_mask = sample.get("target_order_mask")
+    has_target_order_mask = target_order_mask is not None
+    if target_order_mask is None:
+        target_order_mask = torch.ones(dataset.target_len, dtype=torch.bool)
+    target_order_mask = target_order_mask.to(device).unsqueeze(0)
+
+    target_region_ids = sample.get("target_region_ids")
+    if target_region_ids is not None:
+        target_region_ids = target_region_ids.to(device).unsqueeze(0)
+
+    target = torch.full((1, dataset.target_len), dataset.pad_id, dtype=torch.long, device=device)
+    target = torch.where(target_order_mask, torch.full_like(target, dataset.mask_id), target)
+    remaining = target_order_mask.clone()
     full_order = []
+    trace = []
+    generation_steps = int(target_order_mask.sum().item())
 
-    for _ in range(dataset.target_len):
-        input_ids, padding_mask = build_model_inputs(prefix_ids, prefix_padding_mask, target)
-        outputs = model(input_ids, padding_mask)
+    for step in range(generation_steps):
+        built = build_model_inputs(
+            prefix_ids,
+            prefix_padding_mask,
+            target,
+            prefix_region_ids=prefix_region_ids,
+            target_region_ids=target_region_ids,
+            target_order_mask=target_order_mask,
+        )
+        if len(built) == 2:
+            input_ids, padding_mask = built
+            region_ids = None
+        else:
+            input_ids, padding_mask, region_ids = built
+        if region_ids is None:
+            outputs = model(input_ids, padding_mask)
+        else:
+            outputs = model(input_ids, padding_mask, region_ids=region_ids)
 
         order_logits = outputs["order_logits"].masked_fill(~remaining, float("-inf"))
-        slot = int(sample_logits(order_logits, temperature=temperature, greedy=greedy_order).item())
+        order_probs = F.softmax(order_logits / temperature, dim=-1) if temperature > 0 else None
+        slot = int(
+            sample_logits(
+                order_logits,
+                temperature=temperature,
+                greedy=greedy_order,
+                top_p=order_top_p,
+            ).item()
+        )
 
-        value_logits = mask_loarm_value_logits(outputs["value_logits"], dataset.mask_id)
+        value_logits = mask_loarm_value_logits(
+            outputs["value_logits"],
+            dataset.mask_id,
+            invalid_value_ids=dataset.tokenizer.special_ids,
+        )
         selected_value_logits = value_logits[0, slot, :]
         value = int(sample_logits(selected_value_logits.unsqueeze(0), temperature=temperature, greedy=greedy_value).item())
 
         target[0, slot] = value
         remaining[0, slot] = False
         full_order.append(slot)
+        trace.append(
+            {
+                "step": int(step),
+                "slot": int(slot),
+                "region_id": int(target_region_ids[0, slot].item()) if target_region_ids is not None else None,
+                "order_prob": float(order_probs[0, slot].item()) if order_probs is not None else None,
+                "value_id": int(value),
+            }
+        )
 
     target_ids = target.squeeze(0).detach().cpu().tolist()
-    sequence_length = effective_target_length(target_ids, dataset.eos_id)
+    order_mask = target_order_mask.squeeze(0).detach().cpu().tolist()
+    if has_target_order_mask:
+        sequence_length = int(sum(bool(value) for value in order_mask))
+    else:
+        sequence_length = effective_target_length(target_ids, dataset.eos_id)
     order = [position for position in full_order if position < sequence_length]
-    return order, full_order, target_ids
+    return order, full_order, target_ids, order_mask, trace
 
 
 def token_count(dataset, seq, reverse=False, max_len=None):
@@ -364,15 +454,17 @@ def run_loarm(args, checkpoint, device):
     n_samples = min(args.samples, len(dataset))
     results = []
     for idx in tqdm(range(n_samples), desc="Tracking LO-ARM Generation Orders"):
-        sample = dataset.samples[idx]
-        order, full_order, target_ids = track_loarm_generation_order(
+        sample = dataset[idx]
+        layout = int_layout(sample["layout"])
+        order, full_order, target_ids, target_order_mask, trace = track_loarm_generation_order(
             model,
             dataset,
-            sample["cds"],
+            sample,
             device,
             temperature=args.temperature,
             greedy_order=not args.sample_order,
             greedy_value=not args.sample_values,
+            order_top_p=args.order_top_p,
         )
         results.append({
             "id": sample["id"],
@@ -383,8 +475,11 @@ def run_loarm(args, checkpoint, device):
             "target_length": dataset.target_len,
             "full_generation_order": full_order,
             "target_ids": target_ids,
-            "utr5_token_length": token_count(dataset, sample["utr5"], reverse=True, max_len=dataset.max_utr5_len),
-            "utr3_token_length": token_count(dataset, sample["utr3"], max_len=dataset.max_utr3_len),
+            "target_order_mask": target_order_mask,
+            "layout": layout,
+            "order_trace": trace,
+            "utr5_token_length": layout["utr5_len"],
+            "utr3_token_length": layout["utr3_len"],
             "special_tokens": special_token_metadata(dataset),
         })
     return results
